@@ -1,6 +1,17 @@
 Unreleased
 ==========
 
+- **Up to 16 indexing threads.** The writer used at most 8; it now follows
+  the cores up to 16, with the postings heap and the suffix collector's
+  budget expressed **per thread** (25 MB and 128 MB natively, as before per
+  thread) so that segments keep their size as the thread count grows. On a
+  24-core machine the whole kernel indexes in 48 s instead of 59, the same
+  peak memory, 308 segments instead of 263 and equal query times on the
+  comparison panel; an 8-core machine sees no change; the browser keeps its
+  single thread. `LUCIVY_WRITER_THREADS`, `LUCIVY_WRITER_HEAP` and
+  `LUCIVY_SFX_HEAP` still override. With the day's other changes the kernel
+  goes from 97 s to 48.
+
 - **Compacting the shard dictionary: 8.4 → 2.6 s on four kernel generations,
   the same bytes out.** The merge sorted and deduplicated the parents of a
   key held by several generations before the encoder sorted them again —

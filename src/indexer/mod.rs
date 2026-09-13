@@ -46,7 +46,7 @@ mod stamper;
 
 use smallvec::SmallVec;
 
-pub use self::index_writer::{advance_deletes, IndexWriter, IndexWriterOptions};
+pub use self::index_writer::{advance_deletes, IndexWriter, IndexWriterOptions, MAX_NUM_THREAD};
 pub use self::log_merge_policy::LogMergePolicy;
 pub use self::merge_operation::MergeOperation;
 pub use self::merge_policy::{MergeCandidate, MergePolicy, NoMergePolicy};
