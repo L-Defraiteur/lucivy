@@ -84,11 +84,11 @@ pub(crate) fn fold_new_texts(
     let committed: HashSet<_> = shared.segment_manager.committed_segment_metas()
         .iter().map(|m| m.id()).collect();
 
-    // The new segments: their minted ids (to release the pending texts once
-    // the pairs are live parts), and their pair — built now, from the
-    // texts, for a segment written before `.newsfx` existed.
+    // The new segments and their pair — built now, from the texts, for a
+    // segment written before `.newsfx` existed. (The pending texts they
+    // minted are released by epoch, `forget_committed_pending`: no set of
+    // their ids to build.)
     let mut new_pending: Vec<String> = Vec::new();
-    let mut folded_ids: HashSet<(u32, u64)> = HashSet::new();
     let mut new_texts: usize = 0;
     let mut new_fields: Vec<u32> = Vec::new();
     for entry in shared.segment_manager.segment_entries() {
@@ -103,10 +103,8 @@ pub(crate) fn fold_new_texts(
             let Ok(slice) = segment.open_read_custom(&format!("{field_id}.newtexts")) else { continue };
             let texts = slice.read_bytes()?;
             let Some(reader) = TermTextsReaderV3::open(&texts) else { continue };
-            let before = folded_ids.len();
-            folded_ids.extend(reader.ids().map(|g| (field_id, g as u64)));
-            if folded_ids.len() == before { continue; }
-            new_texts += folded_ids.len() - before;
+            if reader.num_terms() == 0 { continue; }
+            new_texts += reader.num_terms() as usize;
             has_pair = true;
             if !new_fields.contains(&field_id) { new_fields.push(field_id); }
             if segment.open_read_custom(&format!("{field_id}.newsfx")).is_err() {
@@ -143,7 +141,7 @@ pub(crate) fn fold_new_texts(
         meta.field_ids.sort_unstable();
         meta.pending_segments.extend(new_pending);
         let next = SfxDictionary::open(index.directory(), &meta, Some(&dictionary));
-        next.forget_pending(&folded_ids);
+        next.forget_committed_pending();
         index.set_sfx_dictionary(Some(Arc::new(next)));
         meta
     };

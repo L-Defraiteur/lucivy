@@ -23,7 +23,7 @@ Tout le workspace est en **4.2.0** ; `lucivy-fst` garde son numéro propre.
 | disposition | index | × texte | indexation 4.2 | ce qu'elle change |
 |---|---|---|---|---|
 | `sfx_version` 3 | 6 886 Mo | ×7,7 | 51 s | une FST de suffixes par segment |
-| dictionnaire partagé (défaut) | 5 064 Mo | ×5,6 | 47 s | une FST par shard, en générations |
+| dictionnaire partagé (défaut) | 5 064 Mo | ×5,6 | 47 s (**39,9 s** sur la branche `v4.3`, `07` § 5 sexies-septies) | une FST par shard, en générations |
 | + `derived_in_ram` | 3 408 Mo | ×3,8 | 46 s | les trois dérivés rebâtis à l'ouverture |
 | + `positions: false` (4.1) | **2 491 Mo** | **×2,8** | 47 s | documents + fréquences, chaque match vérifié sur le texte stocké |
 
@@ -93,8 +93,12 @@ document ─ tokenizer ─┬─ index inversé (postings, fréquences)
   **cache partagé des ids trouvés** (`LookupCache` : table fixe de paires atomiques,
   deux slots par hash, sans verrou ; chaque hit vérifié sur `.termtexts` avant usage —
   le cache propose, le fichier décide), puis la marche des parties FST, puis la table
-  des textes en attente (64 stripes) et le mintage (compteur atomique par champ). Sur
-  le noyau : 71 % des marches évitées. Dans une marche, le groupe de parents voulu
+  des textes en attente (64 stripes ; **par époque de commit depuis le 13 au soir,
+  tard** : clés en arène, table par époque, `prepare_commit` tourne l'époque avant de
+  vider les écrivains et le commit lâche les époques antérieures entières une fois ses
+  paires nommées — le `retain` à `String` était 6,7 s de chemin sériel sur le noyau)
+  et le mintage (compteur atomique par champ). Sur le noyau : 71 % des marches
+  évitées. Dans une marche, le groupe de parents voulu
   est atteint par le `.pidx` (dichotomie, au plus 16 en-têtes, arrêt au premier
   recouvrement dépassé) : décodage 52 → 23 s de CPU sur le noyau, mur 48,2 → 47,4.
   Un fichier de plus dans une génération se déclare dans

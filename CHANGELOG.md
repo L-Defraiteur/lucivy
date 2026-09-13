@@ -1,6 +1,20 @@
 Unreleased — branch `v4.3`
 ==========================
 
+- **The commit no longer stops the world to forget its pending texts.** With
+  the shard dictionary, the texts a writer minted since the last fold live in
+  a pending table until a commit names their segments' pairs; forgetting them
+  was a `retain` over a map keyed by `String`, millions of `String` drops, and
+  a set of every folded id read back from the segments — 6.7 s of the whole
+  kernel's 48, on the serial path where the main thread waits and one pool
+  thread works. The table is now kept by commit epoch (keys in an arena, one
+  hash table per epoch and stripe): `prepare_commit` turns the epoch before
+  any writer flushes, and once the commit has named its pairs every earlier
+  epoch is dropped whole. Whole kernel: 48.2 → 39.9 s (with the group index
+  below), same segments, same ids minted, same query results; the commit's
+  naming step 6 731 → 63 ms. Found with `benches/gdb_timeline.py`, the pool's
+  utilization over time from the gdb samples.
+
 - **A derived group index next to every dictionary generation
   (`dict-<g>.<field>.pidx`).** A parents record of many overlap groups was
   read group header by group header until the wanted one: on the kernel's

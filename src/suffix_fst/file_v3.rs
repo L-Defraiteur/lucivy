@@ -282,6 +282,20 @@ impl FstMemo {
     }
 }
 
+/// Where a part's group index (`dictionary_pidx`) comes from.
+pub enum GroupIndexSource {
+    /// No index: the lookups scan the record (a pending pair — small, and
+    /// gone at the next fold; scanning it is cheaper than building at
+    /// every reopen).
+    None,
+    /// An index already built or opened (a reader that reopens keeps them).
+    Ready(super::dictionary_pidx::GroupIndex),
+    /// Build it from the parents table now.
+    Build,
+    /// The bytes of a `.pidx` file; a build when they do not open.
+    Bytes(common::OwnedBytes),
+}
+
 /// Reads a .sfx v3 file.
 #[derive(Clone)]
 pub struct SfxFileReaderV3 {
@@ -370,11 +384,10 @@ impl SfxFileReaderV3 {
         Ok(reader)
     }
 
-    /// `open_parts` over parts that may each bring their group index
-    /// (`dictionary_pidx`, the `.pidx` next to a generation); a part
-    /// without one, or whose bytes do not open, gets it built in RAM from
-    /// its parents table — a version-8 part only.
-    pub fn open_parts_indexed(parts: Vec<(common::OwnedBytes, Option<common::OwnedBytes>)>) -> Result<Self, SfxV3Error> {
+    /// `open_parts` over parts that each say where their group index comes
+    /// from (`dictionary_pidx`: the `.pidx` next to a generation, one already
+    /// built, a build from the table, or none at all).
+    pub fn open_parts_indexed(parts: Vec<(common::OwnedBytes, GroupIndexSource)>) -> Result<Self, SfxV3Error> {
         let mut it = parts.into_iter();
         let (first, first_index) = it.next().ok_or(SfxV3Error::InvalidFormat)?;
         let mut reader = Self::open_owned(first)?.with_group_index(first_index);
@@ -384,16 +397,21 @@ impl SfxFileReaderV3 {
         Ok(reader)
     }
 
-    /// Attach the group index of this file's table: the given bytes when
-    /// they open, else one built in RAM (version 8 only; older layouts
-    /// have no grouped record).
-    pub fn with_group_index(mut self, bytes: Option<common::OwnedBytes>) -> Self {
+    /// Attach the group index of this file's table (version 8 only; older
+    /// layouts have no grouped record). `Bytes` that do not open fall back
+    /// to a build.
+    pub fn with_group_index(mut self, source: GroupIndexSource) -> Self {
         use super::dictionary_pidx::GroupIndex;
         if self.version <= OVERLAP_IN_KEY_VERSION {
             return self;
         }
-        self.group_index = bytes.and_then(GroupIndex::open)
-            .or_else(|| Some(GroupIndex::build(self.parent_list_data.as_slice())));
+        self.group_index = match source {
+            GroupIndexSource::None => None,
+            GroupIndexSource::Ready(index) => Some(index),
+            GroupIndexSource::Build => Some(GroupIndex::build(self.parent_list_data.as_slice())),
+            GroupIndexSource::Bytes(bytes) => Some(GroupIndex::open(bytes)
+                .unwrap_or_else(|| GroupIndex::build(self.parent_list_data.as_slice()))),
+        };
         self
     }
 
