@@ -107,7 +107,8 @@ fois » ; l'option reste optionnelle, le défaut ne change pas.
    `positions=False`, Node 7ᵉ argument / option `positions`, C++ et navigateur
    `"positions": false` dans l'objet schéma.
 2. Mesurer à froid (caches vidés) avant d'annoncer des temps.
-3. Publier 4.1 sur décision de Lucie (CI verte d'abord, tag par elle). **Au passage en 4.1**, changer
+3. ~~Publier 4.1~~ **fait le 13 septembre 2026** : tag `v4.1.0` sur `main` = `0a41f24`, PyPI, npm (6 paquets),
+   `lucivy-wasm`, crates.io (5 crates), release GitHub (12 artefacts). **Au passage en 4.1**, changer
    le numéro partout où il est écrit : titres des README (`# lucivy 4.0.2`, `# lucivy-wasm 4.0.2`),
    `pip install lucivy  # 4.0.2`, `npm install lucivy   # 4.0.2`, en-tête C++ (`Version 4.0.2`),
    `lucivy-core = "4.0"`, « all 4.0.2 » du README principal, en-tête d'`ARCHITECTURE.md`, `Cargo.toml` /
