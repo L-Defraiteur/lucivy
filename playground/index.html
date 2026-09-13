@@ -1252,7 +1252,7 @@ V3_CORPUS=/tmp/linux-bench V3_SFX_VERSION=4 cargo test --release -p lucivy-core 
     <p style="margin-top:12px">
       What the other two do better, in the same report: Elasticsearch answers a plain substring in
       3-8 ms to lucivy's 12-15 and is a distributed system; tantivy indexes the corpus in seconds
-      (lucivy: 56 s per-segment, 107 s with the shared dictionary); both run a
+      (lucivy: 47 s in 4.2, on 16 threads &mdash; 107 s when this was first measured); both run a
       term-level fuzzy in a fifth of lucivy's time at two edits &mdash; on a different question, and
       every such row says so. tantivy's n-gram tokenizer emits every position as 0, so a trigram
       phrase there matches nothing: its rows use the honest path, an AND of trigrams then a
@@ -1278,13 +1278,13 @@ V3_CORPUS=/tmp/linux-bench V3_SFX_VERSION=4 cargo test --release -p lucivy-core 
     <table>
       <tr><th></th><th>native (Rust, mmap)</th><th>browser (WASM, <code>index linux</code>)</th></tr>
       <tr><td>files</td><td>13 806 (the harness skips a few directories)</td><td>14 032, 126 MB of text</td></tr>
-      <tr><td>index</td><td>905 MB on disk</td><td>1 089 MB, held in memory</td></tr>
-      <tr><td>indexing</td><td>23 s</td><td>41 s (a commit every 8 MB of text)</td></tr>
-      <tr><td><code>mutex_lock</code>, separators relaxed</td><td>2 ms</td><td>10-18 ms</td></tr>
-      <tr><td><code>spin_lock</code> / <code>spin_lock_init</code>, strict</td><td>3 ms</td><td>11-48 ms</td></tr>
-      <tr><td><code>fuzzy schdule</code> (d = 1)</td><td>10 ms</td><td>29-33 ms</td></tr>
-      <tr><td><code>fuzzy regsiter</code> (d = 2)</td><td>128 ms</td><td>&mdash;</td></tr>
-      <tr><td><code>regex spin_lock_[a-z]+</code></td><td>52 ms</td><td>113-127 ms</td></tr>
+      <tr><td>index</td><td>896 MB on disk</td><td>1 089 MB, held in memory</td></tr>
+      <tr><td>indexing</td><td>9 s (23 s in 4.0)</td><td>35 s (41 s in 4.0; a commit every 8 MB of text, one thread)</td></tr>
+      <tr><td><code>mutex_lock</code>, separators relaxed</td><td>3 ms</td><td>5-21 ms</td></tr>
+      <tr><td><code>spin_lock</code> / <code>spin_lock_init</code>, strict</td><td>4 ms / 3 ms</td><td>8-9 ms / 6 ms</td></tr>
+      <tr><td><code>fuzzy schdule</code> (d = 1)</td><td>11 ms</td><td>20-21 ms</td></tr>
+      <tr><td><code>fuzzy regsiter</code> (d = 2)</td><td>121 ms</td><td>257-263 ms</td></tr>
+      <tr><td><code>regex spin_lock_[a-z]+</code></td><td>54 ms</td><td>103-107 ms</td></tr>
       <tr><td><b>10 000 files of a modern kernel, index on disk</b></td><td colspan="2"><b>3.0.8: 2 307 MB &rarr; 4.0: 455 MB per segment, 345 MB with the shared dictionary</b></td></tr>
     </table>
     </div>
@@ -1353,7 +1353,7 @@ index.search(&query, 10, None)?;</pre>
     <h2>Honest limits</h2>
     <ul>
       <li>Prebuilt binaries cover Linux x86_64/aarch64, macOS x86_64/arm64 and Windows x86_64 (the Python wheel, the npm package); Alpine (musl), FreeBSD and 32-bit build from source, with a Rust toolchain.</li>
-      <li>In the browser a tab addresses 4 GB, and indexing itself takes 1.5 GB of it: about 200 MB of text is the ceiling &mdash; the whole Linux 2.6.0 kernel (14&nbsp;032 files, 126 MB) indexes in 28 s and holds 1.1 GB; 15&nbsp;000 files of a modern kernel (214 MB) take a minute and 1.6 GB; the terminal refuses a repository beyond that rather than let the tab die.</li>
+      <li>In the browser a tab addresses 4 GB, and indexing itself takes 1.5 GB of it: about 200 MB of text is the ceiling &mdash; the whole Linux 2.6.0 kernel (14&nbsp;032 files, 126 MB) indexes in 35 s and holds 1.1 GB; 15&nbsp;000 files of a modern kernel (214 MB) take a minute and 1.6 GB; the terminal refuses a repository beyond that rather than let the tab die.</li>
       <li>Fuzzy at distance 2 costs 5-10&times; distance 1; a regex with no usable literal is a scan &mdash; <code>query_warnings</code> tells you before you run it.</li>
       <li>One maintainer. The storage layer (segments, postings, doc store, fast fields) derives from tantivy 0.22; everything above it &mdash; the SFX engine, the query system, sharding, snapshots, the actor runtime, the bindings, the browser build &mdash; is new.</li>
     </ul>
@@ -1876,7 +1876,7 @@ async function startup() {
     // Cache-buster: GitHub Pages caches the worker and the wasm for a while,
     // and a phone kept a whole build behind after a deploy. Bumped at each
     // engine or worker change; the query rides through to the wasm.
-    const BUILD = '4.1.0-ebf80c9';
+    const BUILD = '4.2.0-4cf9067';
     lucivy = new Lucivy(`./js/lucivy-worker.js?v=${BUILD}`, {
       noOpfs: startupParams.has('noopfs'),
       verbose: startupParams.has('verbose'), // engine diagnostics (LUCIVY_VERBOSE, V3_PROFILE)
@@ -2907,7 +2907,7 @@ const term = {
 // happening. Cosmetic, never on real output, off under reduced motion.
 const GLITCH_BASE = [
   ' ▚▞▚▞  l u c i v y  ▞▚▞▚      substring search · suffix FST · Rust → WASM',
-  ' ░▒▓█  4.1.0  █▓▒░           01101100 01110101 01100011 01101001 01110110 01111001',
+  ' ░▒▓█  4.2.0  █▓▒░           01101100 01110101 01100011 01101001 01110110 01111001',
   ' ∿ ⌁ ⟁  bm25 · fuzzy · regex · spans  ⟁ ⌁ ∿',
 ];
 const GLITCH_CHARS = '▚▞░▒▓█∿⌁⟁╳◌◍⋮⋯01';

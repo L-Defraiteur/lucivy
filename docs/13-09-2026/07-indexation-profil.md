@@ -218,6 +218,22 @@ tel quel et se convertit au fil de ses compactions). Gain attendu : ~3 s sur 48.
 Après lui : le mintage sans `String` par clé, puis le coût par document des
 collecteurs eux-mêmes, jamais profilé au-delà de `add_value`.
 
+## 5 quinquies. Mis en valeur (13 septembre, soir)
+
+- **Comparatif régénéré** sur le noyau épinglé, index lucivy rebâtis (Elasticsearch
+  et tantivy réutilisés/rebâtis par le script) : les quatre dispositions indexent en
+  **46-51 s** (94-112 le matin), tailles et temps de requête inchangés ;
+  `docs/compare-engines-2026-09-13.md`, tableau du README, article (« Mine takes
+  fifty »), page.
+- **Linux 2.6.0** (le tableau « navigateur contre natif ») : natif **9,1 s**
+  (23 s le 5 septembre), 896 Mo, requêtes égales ; navigateur (`index linux`,
+  un fil, commit tous les 8 Mo) **35 s** (41 s), 1 089 Mo, mêmes comptes ; requêtes à
+  chaud 5-21 / 8-9 / 6 / 20-21 / 257-263 / 103-107 ms. Le corpus natif vit dans
+  `~/lucivy_bench/linux-2.6.0/linux` (extrait de `playground/corpus-linux-2.6.0.tar.gz`).
+- **4.2.0 préparée** : numéro partout, CHANGELOG daté, « What's new in 4.2 » dans
+  les cinq README (le README racine est celui de PyPI), architecture (indexation
+  4.2, résultats 4.2). Le tag et la PR vers `main` attendent le feu vert.
+
 ## 6. Vérification
 
 - `cargo test --release --lib` : 1 471 verts (22 ignorés) ; sans features par

@@ -200,14 +200,14 @@
   <div class="bar"><span class="lab">tantivy, default tokenizer</span><span class="fill"><i style="width:1%"></i></span><span class="val">1 s</span></div>
   <div class="bar"><span class="lab">tantivy, n-grams</span><span class="fill"><i style="width:4%"></i></span><span class="val">5 s</span></div>
   <div class="bar"><span class="lab">Elasticsearch, standard</span><span class="fill"><i style="width:24%"></i></span><span class="val">28 s</span></div>
-  <div class="bar me"><span class="lab">lucivy, positions: false</span><span class="fill"><i style="width:80%"></i></span><span class="val">94 s</span></div>
-  <div class="bar me"><span class="lab">lucivy, derived_in_ram</span><span class="fill"><i style="width:92%"></i></span><span class="val">108 s</span></div>
-  <div class="bar me"><span class="lab">lucivy, default</span><span class="fill"><i style="width:95%"></i></span><span class="val">112 s</span></div>
+  <div class="bar me"><span class="lab">lucivy, positions: false</span><span class="fill"><i style="width:40%"></i></span><span class="val">47 s</span></div>
+  <div class="bar me"><span class="lab">lucivy, derived_in_ram</span><span class="fill"><i style="width:39%"></i></span><span class="val">46 s</span></div>
+  <div class="bar me"><span class="lab">lucivy, default</span><span class="fill"><i style="width:40%"></i></span><span class="val">47 s</span></div>
   <div class="bar"><span class="lab">Elasticsearch, trigrams + wildcard</span><span class="fill"><i style="width:100%"></i></span><span class="val">118 s</span></div>
   <p class="caption">Time to index the corpus.</p>
 </div>
 
-<p>tantivy indexes this corpus in one to five seconds. Mine takes ninety. Its index is three to seven times smaller, depending on what I ask mine to answer. On a whole-word query it answers in 0 ms where mine takes 27. Elasticsearch does the fuzzy phrase as well as I do. If your queries are whole words, use them and be happy.</p>
+<p>tantivy indexes this corpus in one to five seconds. Mine takes fifty (it took ninety when this was first published; the profile of that gap is in the repository's notes, and half of it was avoidable). Its index is three to seven times smaller, depending on what I ask mine to answer. On a whole-word query it answers in 0 ms where mine takes 27. Elasticsearch does the fuzzy phrase as well as I do. If your queries are whole words, use them and be happy.</p>
 
 <p>And note the difference of kind: Elasticsearch is a service you run next to your application; mine is a library that goes inside it. The index lives in your process, in your transaction if you plug your own storage, on your machine — nothing to deploy beside your service, nothing that leaves it, and the same engine runs in the browser with the data staying in the tab.</p>
 

@@ -1,5 +1,5 @@
-Unreleased
-==========
+Lucivy 4.2.0 — 13 September 2026
+================================
 
 - **Up to 16 indexing threads.** The writer used at most 8; it now follows
   the cores up to 16, with the postings heap and the suffix collector's
@@ -10,7 +10,11 @@ Unreleased
   comparison panel; an 8-core machine sees no change; the browser keeps its
   single thread. `LUCIVY_WRITER_THREADS`, `LUCIVY_WRITER_HEAP` and
   `LUCIVY_SFX_HEAP` still override. With the day's other changes the kernel
-  goes from 97 s to 48.
+  goes from 97 s to 48; the whole Linux 2.6.0 tree from 23 s to 9 natively,
+  and from 41 s to 35 in the browser, on its one thread, from the cache and
+  the compaction alone. The engine comparison was regenerated on the pinned
+  kernel (`docs/compare-engines-2026-09-13.md`): the four lucivy layouts index
+  in 46-51 s, sizes and query times unchanged.
 
 - **Compacting the shard dictionary: 8.4 → 2.6 s on four kernel generations,
   the same bytes out.** The merge sorted and deduplicated the parents of a

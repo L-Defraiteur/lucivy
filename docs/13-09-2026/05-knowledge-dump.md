@@ -59,7 +59,7 @@ tables de lignes dans un `CARGO_TARGET_DIR` à part (`CARGO_PROFILE_RELEASE_DEBU
 line-tables-only`). Les compteurs `LUCIVY_VERBOSE=1` horodatés donnent la chronologie
 des commits, replis et finalisations. **Mesurer avant/après dans le même état de
 machine, ancien binaire rebâti** (`git stash` sans `Cargo.lock`, qui n'est pas suivi).
-Lecture : `docs/13-09-2026/07-indexation-profil.md`. **Compaction seule** :
+Le tableau « navigateur contre natif » du README se remesure sur `~/lucivy_bench/linux-2.6.0/linux` (natif, harnais, `V3_COMMIT_EVERY=2000`) et `index linux` dans le terminal de la page. Lecture : `docs/13-09-2026/07-indexation-profil.md`. **Compaction seule** :
 `DICT_DIR=<dossier de liens vers les dict-*> DICT_GENS=2,4,6,11 DICT_FIELD=2 V3_PROFILE=1
 cargo test --release -p lucivy-core --test bench_dict_compaction -- --ignored --nocapture`
 (`DICT_KEEP=1` garde la sortie pour comparer deux builds par `sha256sum`).

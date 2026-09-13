@@ -164,7 +164,7 @@ frequencies instead of its positions (postings `SFP6`, `WSP6`) and writes
 neither `.posmap`, `.word_pos_map` nor `.sibling_v3` — nothing positional is
 computed at indexing or in merges either. The Linux kernel (Linux 7.2,
 101 141 files, 941 MB of text): 5 289 → 2 598 MB, ×5.6 → ×2.8 the text;
-10 000 files −37 %, 30 000 −41 %; indexing 109 → 101 s. A query takes its
+10 000 files −37 %, 30 000 −41 %; indexing 109 → 101 s in 4.1, 47 s in 4.2. A query takes its
 candidate documents from the index — the FST phase reads no position — and
 verifies each one on the stored text with the ground truth's own
 definitions (`suffix_fst::briques::stored`): same documents, same spans,
@@ -254,6 +254,15 @@ and must not call back into the index.
   the index is, whether this build holds it in memory or streams it
   (`LUCIVY_RAM_INDEX_MAX`, 3 GB on wasm32), and loading it once.
 - `drop_index()` — close and delete every file, through the store if any.
+
+Indexing threads (4.2): the writer takes `min(cores, 16)` threads natively
+(one in the browser), with the postings heap and the suffix collector's budget
+expressed per thread (25 MB and 128 MB) so segments keep their size as the
+count grows; `LUCIVY_WRITER_THREADS`, `LUCIVY_WRITER_HEAP` and `LUCIVY_SFX_HEAP`
+override. The dictionary folds stay in the background up to
+`LUCIVY_DICT_MAX_PENDING` (64) pending pairs, and the ids already found are
+cached in a lock-free table verified against the stored texts. The whole kernel
+on a 24-core machine: 97 → 48 s, the same index.
 
 Environment knobs (`LUCIVY_SFX_HEAP`, `LUCIVY_MAX_PENDING_FINALIZE`,
 `LUCIVY_MAX_INFLIGHT_DOCS`, `LUCIVY_MAX_MERGED_DOCS`, `LUCIVY_MERGE_CONCURRENCY`,
