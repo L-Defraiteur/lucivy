@@ -1,6 +1,6 @@
 [package]
 name = "lucivy-fst"
-version = "0.1.0"
+version = "0.1.1"
 description = """
 Finite state transducers for lucivy search engine.
 Fork of BurntSushi/fst with multi-output support and code-source optimizations.

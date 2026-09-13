@@ -111,6 +111,9 @@ jobs:
         with:
           packages-dir: dist
           verbose: true
+          # A re-run of a partially failed release carries on past what is
+          # already there (4.2.0: PyPI and npm were out, crates.io was not).
+          skip-existing: true
 
   publish-npm:
     name: publish to npm
@@ -171,10 +174,22 @@ jobs:
         run: |
           cd bindings/nodejs
           if [ -n "$NODE_AUTH_TOKEN" ]; then auth=""; else auth="--provenance"; fi
+          # A version already on npm is skipped, so a re-run of a partially
+          # failed release carries on rather than failing on it.
+          publish_if_missing() {
+            local name version
+            name=$(node -p "require('./package.json').name")
+            version=$(node -p "require('./package.json').version")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version already published, skipping"
+            else
+              npm publish --access public $auth
+            fi
+          }
           for dir in npm/*/; do
-            (cd "$dir" && npm publish --access public $auth)
+            (cd "$dir" && publish_if_missing)
           done
-          npm publish --access public $auth
+          publish_if_missing
 
   # ── lucivy-wasm ─────────────────────────────────────────────────────
   # Its own job rather than a step of publish-npm: the wasm build is the
@@ -216,7 +231,13 @@ jobs:
         run: |
           cd bindings/emscripten
           if [ -n "$NODE_AUTH_TOKEN" ]; then auth=""; else auth="--provenance"; fi
-          npm publish --access public $auth
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "$name@$version already published, skipping"
+          else
+            npm publish --access public $auth
+          fi
 
   # ── crates.io ───────────────────────────────────────────────────────
   # Last, deliberately. 3.0.0 went out with the crates published first, before
@@ -245,8 +266,14 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
           set -euo pipefail
-          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-          echo "publishing $version"
+          # Every crate has its own version: the workspace's five share one
+          # number, `lucivy-fst` (the FST fork) keeps its own. 4.2.0 failed
+          # here because `ld-lucivy` needed a `lucivy-fst` API that only the
+          # working tree had: the fork is published first, from now on.
+          crate_version() {
+            cargo metadata --no-deps --format-version 1 \
+              | jq -r --arg c "$1" '.packages[] | select(.name == $c) | .version'
+          }
 
           # `cargo publish` waits for the crate to appear in the index, but it
           # gives up with a warning rather than an error — seen on 28 August:
@@ -255,7 +282,7 @@ jobs:
           # the next publish follows immediately and would fail resolving a
           # dependency that is not in the index yet, so wait for real.
           wait_for() {
-            local crate="$1"
+            local crate="$1" version="$2"
             for i in $(seq 1 60); do
               if curl -sf -H 'User-Agent: lucivy-release' \
                    "https://crates.io/api/v1/crates/$crate/$version" >/dev/null 2>&1; then
@@ -268,8 +295,9 @@ jobs:
             return 1
           }
 
-          for crate in luciole lucistore ld-lucivy lucivy-core sparse-vector; do
-            echo "=== $crate ==="
+          for crate in lucivy-fst luciole lucistore ld-lucivy lucivy-core sparse-vector; do
+            version=$(crate_version "$crate")
+            echo "=== $crate $version ==="
             # Already there: a re-run of a partially failed release should
             # carry on rather than stop on "crate version already exists".
             if curl -sf -H 'User-Agent: lucivy-release' \
@@ -281,5 +309,5 @@ jobs:
             # archive, which is what catches a file the package left out. It
             # costs minutes; a crates.io version costs forever.
             cargo publish -p "$crate"
-            wait_for "$crate"
+            wait_for "$crate" "$version"
           done
