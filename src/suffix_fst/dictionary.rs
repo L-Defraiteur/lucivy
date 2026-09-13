@@ -27,6 +27,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, RwLock};
 
 use super::dictionary_bloom::ScalableBloom;
@@ -56,6 +57,8 @@ pub mod stats {
     pub static CALLS: AtomicU64 = AtomicU64::new(0);
     /// Answered by a live generation's FST.
     pub static HITS: AtomicU64 = AtomicU64::new(0);
+    /// Answered by the shared cache of found ids, verified on `.termtexts`.
+    pub static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
     /// Answered by the pending texts.
     pub static PENDING_HITS: AtomicU64 = AtomicU64::new(0);
     /// Skipped the FST walk: the Bloom filter said the key was never minted.
@@ -78,6 +81,8 @@ pub mod stats {
         pub calls: u64,
         /// Answered by a live generation's FST.
         pub hits: u64,
+        /// Answered by the shared cache, verified.
+        pub cache_hits: u64,
         /// Answered by the pending texts.
         pub pending_hits: u64,
         /// New ids minted.
@@ -99,6 +104,7 @@ pub mod stats {
         Snapshot {
             calls: CALLS.swap(0, Relaxed),
             hits: HITS.swap(0, Relaxed),
+            cache_hits: CACHE_HITS.swap(0, Relaxed),
             pending_hits: PENDING_HITS.swap(0, Relaxed),
             mints: MINTS.swap(0, Relaxed),
             filtered: FILTERED.swap(0, Relaxed),
@@ -112,8 +118,8 @@ pub mod stats {
     impl std::fmt::Display for Snapshot {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             let ms = |ns: u64| ns as f64 / 1e6;
-            write!(f, "{} lookups ({} in a generation, {} pending, {} minted, {} FST walks skipped by the filter): {:.0} ms, of which termtexts open {:.0}, fst {:.0}, lock {:.0}",
-                self.calls, self.hits, self.pending_hits, self.mints, self.filtered,
+            write!(f, "{} lookups ({} from the cache, {} in a generation, {} pending, {} minted, {} FST walks skipped by the filter): {:.0} ms, of which termtexts open {:.0}, fst {:.0}, lock {:.0}",
+                self.calls, self.cache_hits, self.hits, self.pending_hits, self.mints, self.filtered,
                 ms(self.total_ns), ms(self.open_ns), ms(self.fst_ns), ms(self.lock_ns))
         }
     }
@@ -122,6 +128,97 @@ pub mod stats {
 /// The slot an `Index` keeps its live dictionary in; a collector reads it at
 /// each lookup so that a commit's swap reaches writers already running.
 pub type DictionarySlot = Arc<std::sync::RwLock<Option<Arc<SfxDictionary>>>>;
+
+/// The ids found so far, shared by every collector thread of the index:
+/// a fixed table of `(hash of field + intern key, id)` pairs, two slots per
+/// hash, read and written with relaxed atomics and **no lock** — two
+/// writers may tear a pair, a newer text may evict an older one, and none
+/// of that matters because a hit is only used once `SfxDictionary::verify`
+/// has read the id's text and shape back from `.termtexts`: the cache
+/// proposes, the file decides. A miss or a failed check takes the normal
+/// path. Ids are stable across folds, so nothing ever needs clearing.
+///
+/// Why shared and why lock-free: on the whole kernel 46.9 M of 68.6 M
+/// lookups per shard walked every live part's FST for a text that
+/// existed, 4.1 µs each — 190 s of CPU. A cache per collector thread saw
+/// 30 % of the repeats (the first hit of every text on each of the eight
+/// threads still walked); the shared one locked with mutexes, measured on
+/// 6 September, cost in waiting what it saved in walks.
+pub struct LookupCache {
+    keys: Vec<AtomicU64>,
+    ids: Vec<AtomicU64>,
+    /// Lookups answered by a slot (verified or not).
+    pub hits: AtomicU64,
+    /// Lookups with no slot for the hash.
+    pub misses: AtomicU64,
+    /// Hits whose id did not verify: a text minted since the last commit
+    /// (not yet in any part's `.termtexts`), or a torn or evicted slot.
+    pub unverified: AtomicU64,
+}
+
+/// Slots of the shared cache: 16 bytes each — 64 MB per index natively
+/// (the pages are touched as they fill), 4 MB in the browser.
+pub const LOOKUP_CACHE_SLOTS: usize = if cfg!(target_arch = "wasm32") { 1 << 18 } else { 1 << 22 };
+
+impl Default for LookupCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LookupCache {
+    /// An empty table of `LOOKUP_CACHE_SLOTS` slots.
+    pub fn new() -> Self {
+        Self {
+            keys: (0..LOOKUP_CACHE_SLOTS).map(|_| AtomicU64::new(0)).collect(),
+            ids: (0..LOOKUP_CACHE_SLOTS).map(|_| AtomicU64::new(0)).collect(),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            unverified: AtomicU64::new(0),
+        }
+    }
+
+    #[inline]
+    fn slots(key_hash: u64) -> (usize, usize, u64) {
+        let h = if key_hash == 0 { 1 } else { key_hash };
+        let i = (h as usize) & (LOOKUP_CACHE_SLOTS - 1);
+        (i, i ^ 1, h)
+    }
+
+    /// The id last stored under this hash, if any — to be verified.
+    #[inline]
+    pub fn get(&self, key_hash: u64) -> Option<u64> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (a, b, h) = Self::slots(key_hash);
+        for i in [a, b] {
+            if self.keys[i].load(Relaxed) == h {
+                self.hits.fetch_add(1, Relaxed);
+                return Some(self.ids[i].load(Relaxed));
+            }
+        }
+        self.misses.fetch_add(1, Relaxed);
+        None
+    }
+
+    /// Remember `id` under this hash: an empty slot of the pair if there
+    /// is one, else the first — a later text may evict it, harmlessly.
+    #[inline]
+    pub fn insert(&self, key_hash: u64, id: u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (a, b, h) = Self::slots(key_hash);
+        // An empty slot first, else the first of the pair.
+        let i = if self.keys[a].load(Relaxed) == 0 || self.keys[a].load(Relaxed) == h { a }
+            else if self.keys[b].load(Relaxed) == 0 { b } else { a };
+        self.ids[i].store(id, Relaxed);
+        self.keys[i].store(h, Relaxed);
+    }
+
+    /// `(hits, misses, unverified)` since the last call, which resets them.
+    pub fn stats(&self) -> (u64, u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (self.hits.swap(0, Relaxed), self.misses.swap(0, Relaxed), self.unverified.swap(0, Relaxed))
+    }
+}
 
 /// File name of one generation's file for one field.
 pub fn dictionary_file_name(generation: u64, field_id: u32, ext: &str) -> String {
@@ -285,8 +382,11 @@ impl Drop for TimeInto<'_> {
 /// lock time as it saved, for up to 32 MB per shard — and the walks run on
 /// the collector threads, off the commit path that bounds the indexing time.
 pub struct DictionaryShared {
-    /// Next id per field.
-    next_ids: Mutex<HashMap<u32, u64>>,
+    /// Next id per field: an atomic counter, minted with `fetch_add` under
+    /// the key's stripe — one mutex for every mint of every collector
+    /// thread was 1.7 s of waiting on the first commit of 2 000 kernel
+    /// files (13 September). The map only grows (a field seen once stays).
+    next_ids: RwLock<HashMap<u32, AtomicU64>>,
     /// The pending texts: field → collector intern key → id.
     stripes: Vec<Mutex<HashMap<u32, HashMap<String, u64>>>>,
     /// Per field, the Bloom filter over every FST key minted or folded
@@ -294,6 +394,8 @@ pub struct DictionaryShared {
     filters: RwLock<HashMap<u32, Arc<ScalableBloom>>>,
     /// Serializes the seeding of a field's filter.
     filter_build: Mutex<()>,
+    /// The ids found so far (`LookupCache`), consulted before any FST walk.
+    lookup_cache: LookupCache,
 }
 
 const STRIPES: usize = 16;
@@ -301,10 +403,11 @@ const STRIPES: usize = 16;
 impl DictionaryShared {
     fn new(next_ids: HashMap<u32, u64>) -> Self {
         Self {
-            next_ids: Mutex::new(next_ids),
+            next_ids: RwLock::new(next_ids.into_iter().map(|(f, n)| (f, AtomicU64::new(n))).collect()),
             stripes: (0..STRIPES).map(|_| Mutex::new(HashMap::new())).collect(),
             filters: RwLock::new(HashMap::new()),
             filter_build: Mutex::new(()),
+            lookup_cache: LookupCache::new(),
         }
     }
 
@@ -392,16 +495,35 @@ impl SfxDictionary {
     /// by another writer since the last commit comes back with `false` — its
     /// minter writes it to `.newtexts`.
     pub fn lookup_or_mint(&self, field_id: u32, key: &str, text: &str, meta: &TokenMetaV3) -> (u64, bool) {
+        use std::hash::{Hash, Hasher};
+        let mut h = rustc_hash::FxHasher::default();
+        field_id.hash(&mut h);
+        key.hash(&mut h);
+        self.lookup_or_mint_hashed(field_id, key, h.finish(), text, meta)
+    }
+
+    /// `lookup_or_mint` with the caller's hash of (field, key) — the key of
+    /// the shared `LookupCache`, asked first and fed with every answer.
+    pub fn lookup_or_mint_hashed(&self, field_id: u32, key: &str, key_hash: u64, text: &str, meta: &TokenMetaV3) -> (u64, bool) {
         use std::sync::atomic::Ordering::Relaxed;
         let timed = crate::diag::is_verbose();
         let t_all = timed.then(std::time::Instant::now);
         let _all_guard = t_all.map(|t| TimeInto(t, &stats::TOTAL_NS));
         if timed { stats::CALLS.fetch_add(1, Relaxed); }
+        let cache = &self.shared.lookup_cache;
+        if let Some(id) = cache.get(key_hash) {
+            if self.verify(field_id, id, text, meta) {
+                if timed { stats::CACHE_HITS.fetch_add(1, Relaxed); }
+                return (id, false);
+            }
+            cache.unverified.fetch_add(1, Relaxed);
+        }
         let filter = self.filter(field_id);
         if filter.maybe_contains(key.as_bytes()) {
             let fst_key = fst_key(text, meta.is_word_stripped, meta.own_len, meta.overlap_len);
             if let Some(id) = self.field(field_id).and_then(|f| f.lookup_with_key(text, meta, &fst_key)) {
                 if timed { stats::HITS.fetch_add(1, Relaxed); }
+                cache.insert(key_hash, id);
                 return (id, false);
             }
         } else if timed {
@@ -412,17 +534,24 @@ impl SfxDictionary {
         let mut stripe = self.shared.stripe(field_id, key).lock().unwrap();
         if let Some(&id) = stripe.get(&field_id).and_then(|m| m.get(key)) {
             if timed { stats::PENDING_HITS.fetch_add(1, Relaxed); }
+            cache.insert(key_hash, id);
             return (id, false);
         }
         let id = {
-            let mut next_ids = self.shared.next_ids.lock().unwrap();
-            let next = next_ids.entry(field_id).or_insert(0);
-            let id = *next;
-            *next += 1;
-            id
+            let ids = self.shared.next_ids.read().unwrap();
+            match ids.get(&field_id) {
+                Some(counter) => counter.fetch_add(1, Relaxed),
+                None => {
+                    drop(ids);
+                    self.shared.next_ids.write().unwrap()
+                        .entry(field_id).or_insert_with(|| AtomicU64::new(0))
+                        .fetch_add(1, Relaxed)
+                }
+            }
         };
         stripe.entry(field_id).or_default().insert(key.to_string(), id);
         filter.insert(key.as_bytes());
+        cache.insert(key_hash, id);
         if timed { stats::MINTS.fetch_add(1, Relaxed); }
         (id, true)
     }
@@ -441,7 +570,7 @@ impl SfxDictionary {
         if let Some(f) = self.shared.filters.read().unwrap().get(&field_id) {
             return f.clone();
         }
-        let minted = self.shared.next_ids.lock().unwrap().get(&field_id).copied().unwrap_or(0);
+        let minted = self.shared.next_ids.read().unwrap().get(&field_id).map(|c| c.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(0);
         let filter = Arc::new(ScalableBloom::with_capacity(minted * 2));
         if let Some(texts) = self.field(field_id).and_then(|f| f.termtexts()) {
             let t = std::time::Instant::now();
@@ -490,9 +619,29 @@ impl SfxDictionary {
         self.fields.get(&field_id)
     }
 
+    /// Whether `id` is the id of `text` with this shape in `field_id`, read
+    /// from the live parts' `.termtexts` — what makes a `LookupCache` hit
+    /// exact. `false` for an id no live part holds (a text minted since the
+    /// last commit): the caller then takes the normal path.
+    pub fn verify(&self, field_id: u32, id: u64, text: &str, meta: &TokenMetaV3) -> bool {
+        if id > u32::MAX as u64 {
+            return false;
+        }
+        let Some(texts) = self.field(field_id).and_then(|f| f.termtexts()) else { return false };
+        let Some((stored, m)) = texts.entry(id as u32) else { return false };
+        if stored != text || m.is_word_stripped != meta.is_word_stripped {
+            return false;
+        }
+        if meta.is_word_stripped {
+            m.own_len.saturating_sub(m.sep_len as u16) == meta.own_len.saturating_sub(meta.sep_len as u16)
+        } else {
+            m.own_len == meta.own_len && m.sep_len == meta.sep_len && m.is_word_start == meta.is_word_start
+        }
+    }
+
     /// The next id that would be minted, per field, as `meta.json` records it.
     pub fn next_ids(&self) -> std::collections::BTreeMap<u32, u64> {
-        self.shared.next_ids.lock().unwrap().iter().map(|(&f, &n)| (f, n)).collect()
+        self.shared.next_ids.read().unwrap().iter().map(|(&f, c)| (f, c.load(std::sync::atomic::Ordering::Relaxed))).collect()
     }
 }
 

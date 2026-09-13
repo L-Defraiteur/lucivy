@@ -1,6 +1,23 @@
 Unreleased
 ==========
 
+- **Indexing the whole kernel: 97 → 66 s, same index.** Profiled for the
+  first time since the deferred fold (13 September, a gdb-based sampler,
+  `benches/gdb_sample.sh`): from the third commit on, every commit of 10 000
+  files folded the shard dictionary on the caller's thread because it named
+  more pairs than `LUCIVY_DICT_MAX_PENDING` allowed (16) — 25 s of the 97 —
+  and the collector threads spent 190 s of CPU walking every live part's FST
+  for texts that existed (46.9 M walks of 4.1 µs). Two changes: the pending
+  cap defaults to **64** (the folds stay in the background; the lookups are
+  no slower), and a **shared, lock-free cache of found ids** in front of the
+  walks — a fixed table of atomic pairs, two slots per hash, whose every hit
+  is verified against `.termtexts` before use, so torn or stale entries can
+  never hand out another text's id (64 MB per index natively, 4 MB in the
+  browser). 71 % of the walks gone; 30 000 files 19.5 → 14.5 s. The id
+  counter is atomic instead of a mutex per mint, and the collector interns
+  without allocating a key (neutral in time, half the interning memory).
+  Nothing changes in the files: same documents, same spans, same scores.
+
 - **Reading the documents of a hit list: nothing read unless asked, and read
   in parallel when it is.** Every binding (Python, Node, C++, the browser) and
   `ShardedHandle::search_with_docs` fetched the whole stored document of every
