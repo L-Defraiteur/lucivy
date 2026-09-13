@@ -1244,7 +1244,7 @@ V3_CORPUS=/tmp/linux-bench V3_SFX_VERSION=4 cargo test --release -p lucivy-core 
       <tr><td><code>de</code>, two characters</td><td>93 009</td><td class="fast"><b>93 009</b>, 7.7 M spans, 561 ms</td><td>0, silently</td><td>0, silently</td></tr>
       <tr><td><code>retur -ENOMEM</code>, a fuzzy phrase</td><td>14 449</td><td class="fast"><b>14 449</b>, 30 ms</td><td>14 446 (<code>span_near</code>), 24 ms &mdash; it does this well</td><td>&mdash;</td></tr>
       <tr><td><b>where it matched</b>: <code>mutex_lock</code>, 5 145 documents</td><td>20 797 spans</td><td class="fast"><b>all 20 797, 15 ms</b></td><td><code>highlight</code> on the top 200: 179 ms</td><td>5 145 stored texts re-read: 96 ms</td></tr>
-      <tr><td>index, 857 MB of text</td><td>&mdash;</td><td class="fast">4 926 MB (&times;5.8); 3 335 MB (&times;3.9) with <code>derived_in_ram</code></td><td>3 082 MB (&times;3.6)</td><td>680 MB (&times;0.8)</td></tr>
+      <tr><td>index, 899 MB of text</td><td>&mdash;</td><td class="fast"><b>2 478 MB (&times;2.8)</b> with <code>positions: false</code>; 3 392 MB (&times;3.8) with <code>derived_in_ram</code>; 5 044 MB (&times;5.6) by default</td><td>3 050 MB (&times;3.4)</td><td>735 MB (&times;0.8)</td></tr>
       <tr><td>your index <b>in your transaction</b></td><td>&mdash;</td><td class="fast"><b>yes</b>: pluggable store, one commit, rollback included</td><td>no: a server next to your database</td><td>no: its own directory, its own commit</td></tr>
       <tr><td>shards and nodes scoring <b>as one index</b>, as a library</td><td>&mdash;</td><td class="fast"><b>yes</b>, asserted by a test</td><td>yes, as a cluster</td><td>no: one index, one scale of scores</td></tr>
     </table>

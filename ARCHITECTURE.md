@@ -379,11 +379,12 @@ highlights per field.
 `benches/compare_engines.sh <corpus>` builds lucivy's three layouts, Elasticsearch
 8.19 configured at its best for substrings (trigram analyzer, `wildcard` field)
 and tantivy 0.25 (default and `NgramTokenizer`) on the same files, and judges
-every row by the same scan. On the kernel (93 983 files, 857 MB):
+every row by the same scan. On the kernel (101 373 files, 899 MB, Linux v7.2 at
+commit `8d3ae59288f1`, pinned by the bench):
 
 | | Elasticsearch, trigrams + wildcard | tantivy, trigrams | lucivy 4.0 |
 |---|---|---|---|
-| index | 3 082 MB (×3.6) | 680 MB (×0.8) | 4 926 MB (×5.8); 3 335 MB (×3.9) with `derived_in_ram` |
+| index | 3 050 MB (×3.4) | 735 MB (×0.8) | **2 478 MB (×2.8) with `positions: false`**; 3 392 MB (×3.8) with `derived_in_ram`; 5 044 MB (×5.6) by default |
 | `spin_lock`, separators relaxed (truth 9 552) | 6 577 — not with this analyzer | 6 601 — relaxed is its only mode | **9 552** |
 | `spinlokc`, two edits across the boundary (10 034) | 3 549 | 6 557 | **10 034** |
 | `de`, two characters (93 009) | 0, silently | 0, silently | **93 009** |

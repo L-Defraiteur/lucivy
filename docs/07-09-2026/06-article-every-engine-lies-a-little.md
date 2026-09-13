@@ -74,12 +74,13 @@ This is not a hit piece. Same corpus, same machine, idle:
 
 | | |
 |---|---|
-| tantivy, default tokenizer | 612 MB · ×0.7 |
-| tantivy, n-grams | 680 MB · ×0.8 |
-| Elasticsearch, standard | 781 MB · ×0.9 |
-| Elasticsearch, trigrams + wildcard | 3 082 MB · ×3.6 |
-| lucivy, derived_in_ram | 3 335 MB · ×3.9 |
-| lucivy, default | 4 926 MB · ×5.8 |
+| tantivy, default tokenizer | 657 MB · ×0.7 |
+| Elasticsearch, standard | 722 MB · ×0.8 |
+| tantivy, n-grams | 735 MB · ×0.8 |
+| **lucivy, positions: false** | **2 478 MB · ×2.8** |
+| Elasticsearch, trigrams + wildcard | 3 050 MB · ×3.4 |
+| lucivy, derived_in_ram | 3 392 MB · ×3.8 |
+| lucivy, default | 5 044 MB · ×5.6 |
 
 *Time to index the corpus.*
 
@@ -88,11 +89,12 @@ This is not a hit piece. Same corpus, same machine, idle:
 | tantivy, default tokenizer | 1 s |
 | tantivy, n-grams | 5 s |
 | Elasticsearch, standard | 28 s |
-| lucivy, default | 107 s |
-| lucivy, derived_in_ram | 111 s |
-| Elasticsearch, trigrams + wildcard | 123 s |
+| **lucivy, positions: false** | **94 s** |
+| lucivy, derived_in_ram | 108 s |
+| lucivy, default | 112 s |
+| Elasticsearch, trigrams + wildcard | 118 s |
 
-tantivy indexes this corpus in one to five seconds. Mine takes a hundred. Its index is seven times smaller. On a whole-word query it answers in 0 ms where mine takes 27. Elasticsearch does the fuzzy phrase as well as I do. If your queries are whole words, use them and be happy.
+tantivy indexes this corpus in one to five seconds. Mine takes ninety. Its index is three to seven times smaller, depending on what I ask mine to answer. On a whole-word query it answers in 0 ms where mine takes 27. Elasticsearch does the fuzzy phrase as well as I do. If your queries are whole words, use them and be happy.
 
 And note the difference of kind: Elasticsearch is a service you run next to your application; mine is a library that goes inside it. The index lives in your process, in your transaction if you plug your own storage, on your machine — nothing to deploy beside your service, nothing that leaves it, and the same engine runs in the browser with the data staying in the tab.
 

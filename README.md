@@ -355,33 +355,40 @@ in the same panel but is **timed, not verified** — see
 
 ### Against Elasticsearch and tantivy — one corpus, one truth, one command
 
-Same 93 983 kernel files, 857 MB of text. Each engine is configured at its
+Same 101 373 kernel files, 899 MB of text (Linux v7.2 at commit `8d3ae59288f1`,
+pinned by the bench so a number always names the bytes it was measured on). Each engine is configured at its
 best for substring search, not at its default: Elasticsearch 8.19 with a
 trigram analyzer plus a `wildcard` field for regexes, tantivy 0.25 (upstream,
 not the fork) with its `NgramTokenizer`. The truth of every row is the same
 byte-by-byte scan of the files; a lucivy count is `OK` only when its documents
-**and** its byte spans match it. Full report, generated: [docs/compare-engines-2026-09-05.md](docs/compare-engines-2026-09-05.md).
+**and** its byte spans match it. Full report, generated: [docs/compare-engines-2026-09-13.md](docs/compare-engines-2026-09-13.md).
 
 | engine | how it answers a substring | index | × text | indexing |
 |---|---|---|---|---|
-| Elasticsearch, standard analyzer | it does not (whole words) | 781 MB | ×0.9 | 28 s |
-| Elasticsearch, trigrams + `wildcard` | trigram phrases, regex on the wildcard field | 3 082 MB | ×3.6 | 123 s |
-| tantivy, default tokenizer | it does not (whole words) | 612 MB | ×0.7 | 1 s |
-| tantivy, `NgramTokenizer` | trigram AND, then the stored text re-read to verify (its n-gram positions are all 0) | 680 MB | ×0.8 | 5 s |
-| **lucivy 4.0, shared dictionary** | suffix FST, exact spans | **4 926 MB** | **×5.8** | 107 s |
-| **lucivy 4.0, shared dictionary + `derived_in_ram`** | suffix FST, exact spans | **3 335 MB** | **×3.9** | 111 s |
+| Elasticsearch, standard analyzer | it does not (whole words) | 722 MB | ×0.8 | 28 s |
+| Elasticsearch, trigrams + `wildcard` | trigram phrases, regex on the wildcard field | 3 050 MB | ×3.4 | 118 s |
+| tantivy, default tokenizer | it does not (whole words) | 657 MB | ×0.7 | 1 s |
+| tantivy, `NgramTokenizer` | trigram AND, then the stored text re-read to verify (its n-gram positions are all 0) | 735 MB | ×0.8 | 5 s |
+| **lucivy 4.1, shared dictionary + `positions: false`** | suffix FST, exact spans, every match verified on the stored text | **2 478 MB** | **×2.8** | 94 s |
+| **lucivy 4.0, shared dictionary + `derived_in_ram`** | suffix FST, exact spans | **3 392 MB** | **×3.8** | 108 s |
+| **lucivy 4.0, shared dictionary** | suffix FST, exact spans | **5 044 MB** | **×5.6** | 112 s |
 
-On the substring itself all three agree to the document (`mutex_lock` 5 145,
-`spin_lock` 6 569, `sched` 9 289 — bold in the report). Where they part:
+Read the first lucivy row against the second Elasticsearch one: **the index that
+answers every question exactly is smaller than the one that answers some of them
+silently wrong** — 2 478 MB against 3 050, and 94 s to build against 118.
+
+On the substring itself all three agree to the document (`mutex_lock` 5 202,
+`spin_lock` 6 527, `sched` 9 214 — bold in the report). Where they part:
 
 | asked | truth | lucivy | Elasticsearch | tantivy |
 |---|---|---|---|---|
-| `spin_lock`, separators relaxed (also `spin lock`, `spin-lock`, `spinlock`) | 9 552 | **9 552**, 23 ms | 6 577 — not with this analyzer: its trigrams carry the underscore | 6 601 — relaxed is the only mode it has: the separator never enters its index |
-| `spinlokc`, two edits, across the token boundary | 10 034 | **10 034**, 148 ms | 3 549 — fuzziness compares whole terms | 6 557 — same |
-| `spin_lock_[a-z]+`, a regex, case folded | 5 510 | **5 510**, 219 ms | 5 510 on the wildcard field, 1 ms warm — as `[a-zA-Z]+`: Lucene's `case_insensitive` folds a pattern's literals, not its character classes | 0 — terms are already cut |
-| `de`, two characters | 93 009 | **93 009**, 7.7 M spans, 561 ms | 0, silently | 0, silently |
-| `retur -ENOMEM`, a fuzzy phrase | 14 449 | **14 449**, 30 ms | 14 446 (`span_near`), 24 ms — it does this well | — |
-| **where it matched**: `mutex_lock`, 5 145 documents | 20 797 spans | **all 20 797, 15 ms** | `highlight` on the top 200: 179 ms | verifying 5 145 stored texts: 96 ms |
+| `spin_lock`, separators relaxed (also `spin lock`, `spin-lock`, `spinlock`) | 9 545 | **9 545**, 41 ms | 6 524 — not with this analyzer: its trigrams carry the underscore | 6 608 — relaxed is the only mode it has: the separator never enters its index |
+| `spinlokc`, two edits, across the token boundary | 10 117 | **10 117**, 171 ms | 3 534 — fuzziness compares whole terms | 6 585 — same |
+| `spin_lock_[a-z]+`, a regex, case folded | 5 471 | **5 471**, 237 ms (22 ms without positions) | **5 471** on the wildcard field, 1 ms warm — as `[a-zA-Z]+`: Lucene's `case_insensitive` folds a pattern's literals, not its character classes | 0 — terms are already cut |
+| `de`, two characters | 100 166 | **100 166**, 7.9 M spans, 587 ms (190 ms for the documents alone) | 0, silently | 0, silently |
+| `ude`, three characters | 74 500 | **74 500**, 106 ms | 68 561 | **74 679** |
+| `retur -ENOMEM`, a fuzzy phrase | 14 377 | **14 377**, 40 ms | 14 374 (`span_near`), 9 ms — it does this well | — |
+| **where it matched**: `mutex_lock`, 5 202 documents | 21 070 spans | **all 21 070, 13 ms** | `highlight` on the top 200: 108 ms | verifying 5 229 stored texts: 96 ms |
 | your index **in your transaction** | — | **yes**: pluggable store, one commit for your rows and the index, rollback included | no: a server next to your database, a synchronisation to write | no: its own directory, its own commit |
 | shards and nodes scoring **as one index**, as a library | — | **yes**, asserted by `test_federated_search` | yes, as a cluster | no: one index, one scale of scores |
 
