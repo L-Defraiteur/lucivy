@@ -96,6 +96,49 @@ De ce tableau se déduisent des dispositions qui n'existent pas encore :
 3. **Un second dos de candidats** (postings de trigrammes) derrière la même
    vérification, pour les corpus où la taille prime sur la latence.
 
+## Convertir ses propres index d'abord
+
+L'import d'un index étranger n'est pas le premier pas : c'est le dernier. Le
+premier est la **régénération de features sur nos propres index** — « j'ai indexé
+sans positions, je veux maintenant des phrases » —, et c'est la même machinerie.
+
+**Ce qu'on sait déjà faire**, et qui le prouve :
+
+- `derived_in_ram` **reconstruit `.posmap`, `.word_pos_map` et `.sibling_v3` octet
+  pour octet** depuis les postings, à l'ouverture. C'est déjà une régénération.
+- Les fusions réinternent les textes (v3) et remappent les `.gmap` (v4).
+- `test_compat_308` **convertit** un index 3.0.8 : le premier commit en 4.0 le
+  réécrit sans perte.
+
+**La règle qui découpe le problème** : une feature manquante est soit *dérivable*
+de ce qui est sur le disque, soit reconstructible à partir du **texte stocké**.
+
+| cas | source | exemple |
+|---|---|---|
+| dérivable | les structures existantes | dérivés depuis les postings ; postings de trigrammes depuis la FST des suffixes |
+| re-tokenisable | le document store | ajouter les positions à un index `positions: false`, ajouter les entrées mot pour le mode relâché |
+| impossible | rien ne rend le texte | un index de trigrammes sans champs stockés : les trigrammes ne reconstituent pas la source |
+
+Autrement dit : **tant que le texte est stocké, toute feature est régénérable sans
+le corpus d'origine**. C'est déjà la contrainte de `positions: false` (les champs
+texte doivent être stockés), et elle devient ici une propriété utile.
+
+**L'utilitaire** : `convert <index> --features …` qui élague ce qui ne sert plus,
+dérive ce qui se dérive, et ne re-tokenise depuis le document store que le reste.
+Jamais un accès aux données de l'utilisateur.
+
+**La garantie à prouver, et elle est testable aujourd'hui** : un index converti
+répond exactement comme un index bâti directement avec les mêmes features — mêmes
+documents, mêmes spans, mêmes scores, sur le panel de vérité terrain ; et pour les
+fichiers dérivés, égalité octet pour octet, que `derived_in_ram` vérifie déjà.
+
+**Et alors seulement, l'étranger.** Il ne demande plus de logique de conversion,
+seulement un lecteur qui rend `(document, texte)` — `_source` chez Elasticsearch,
+champs `STORED` chez tantivy. « Ils fonctionnent en trigrammes » devient sans
+importance : on n'importe pas leurs trigrammes, on importe leur texte, et on
+régénère nos structures avec le même utilitaire. Ce qui n'a pas de texte stocké ne
+s'importe pas, et il faut le dire franchement plutôt que de rendre un index dégradé.
+
 ## Lien avec le reste
 
 - Les trois options d'aujourd'hui et leurs mesures : `ARCHITECTURE.md`,
