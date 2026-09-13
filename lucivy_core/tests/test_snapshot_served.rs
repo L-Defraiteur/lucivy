@@ -25,9 +25,15 @@ fn run_panel(h: &ShardedHandle, panel: &[(&str, QueryConfig)]) -> Vec<(String, A
         .iter()
         .map(|(name, q)| {
             let hits = h.search_with_docs(q, 10_000).unwrap_or_else(|e| panic!("{name}: {e}"));
-            let top = hits
+            // Every hit, ordered by (score, id): the engine defines no order
+            // between equal scores across segments, and a served snapshot does
+            // not lay its segments out like the index it came from. A top-10 of
+            // a full tie therefore compared segment order, not the snapshot —
+            // `contains kmalloc` failed that way on 13 September 2026, every
+            // score 0.00033313446 on both sides. Same fix as the LUCE roundtrip
+            // took on 6 September.
+            let mut top: Vec<(u64, f32, usize)> = hits
                 .iter()
-                .take(10)
                 .map(|hit| {
                     use ld_lucivy::schema::Value;
                     let id = hit.doc.get_first(nid).and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
@@ -35,6 +41,7 @@ fn run_panel(h: &ShardedHandle, panel: &[(&str, QueryConfig)]) -> Vec<(String, A
                     (id, hit.score, spans)
                 })
                 .collect();
+            top.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
             (name.to_string(), (hits.len(), top))
         })
         .collect()
@@ -141,8 +148,8 @@ fn snapshot_served_answers_like_the_index_it_came_from() {
     let after = run_panel(&served, &panel);
     for ((name, (c1, top1)), (_, (c2, top2))) in before.iter().zip(after.iter()) {
         assert_eq!(c1, c2, "{name}: {c1} hits from the index, {c2} from its snapshot");
-        assert_eq!(top1, top2, "{name}: top-10 differs\n  index    {top1:?}\n  snapshot {top2:?}");
-        eprintln!("[served] OK {name:28} {c1:6} hits, top-10 identical");
+        assert_eq!(top1, top2, "{name}: hits differ\n  index    {top1:?}\n  snapshot {top2:?}");
+        eprintln!("[served] OK {name:28} {c1:6} hits, every hit identical");
     }
 
     // The point of the exercise: the index is not a second copy of the blob.
