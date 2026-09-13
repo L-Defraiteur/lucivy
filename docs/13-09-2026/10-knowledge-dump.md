@@ -16,7 +16,9 @@ cargo test --release --lib --no-default-features        # 1 437
 cargo test --release -p lucivy-core                     # 45-46 lots, tout vert
 cargo test --release -p lucivy-cpp                      # 19
 cargo test --release -p lucivy-fst                      # 141 (la fourche FST)
-cargo clippy -p ld-lucivy -p lucivy-core -p lucivy-cpp -p lucivy-napi   # 0 erreur ; --tests a des erreurs antérieures
+cargo clippy --lib -- -D warnings                       # LA commande de la CI (ci.yml) : un warning = rouge
+cargo clippy -p lucivy-core -p lucistore -p luciole -p sparse-vector --lib -- -D warnings   # idem, les crates écrites sur le moteur
+#   (un clippy --release -p … sans -D warnings passait en local et la CI rougissait sur large_enum_variant, 14 septembre)
 (cd bindings/python && source .venv/bin/activate && bash build.sh && python -m pytest tests -q)   # 113
 (cd bindings/nodejs && npm run build && node test.mjs && for t in tests/*.mjs; do node "$t"; done)
 #   smoke_warnings.mjs prend le chemin absolu de lucivy.node ; test.mjs n'imprime pas « ok »
