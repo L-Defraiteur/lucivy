@@ -382,12 +382,12 @@ On the substring itself all three agree to the document (`mutex_lock` 5 202,
 
 | asked | truth | lucivy | Elasticsearch | tantivy |
 |---|---|---|---|---|
-| `spin_lock`, separators relaxed (also `spin lock`, `spin-lock`, `spinlock`) | 9 545 | **9 545**, 41 ms | 6 524 — not with this analyzer: its trigrams carry the underscore | 6 608 — relaxed is the only mode it has: the separator never enters its index |
 | `spin_lock`, separators strict | 6 527 | **6 527**, 12 ms, 34 436 spans | **6 527** · 0 ms, then 81 ms more to mark the top 200 | 6 563 · 118 ms |
-| `spinlokc`, two edits, across the token boundary | 10 117 | **10 117**, 171 ms | 3 534 — fuzziness compares whole terms | 6 585 — same |
+| `spin_lock`, separators relaxed (also `spin lock`, `spin-lock`, `spinlock`) | 9 545 | **9 545**, 41 ms, 54 680 spans | 6 524 · 0 ms (+54 ms on the top 200) — not with this analyzer: its trigrams carry the underscore | 6 608 — relaxed is the only mode it has: the separator never enters its index |
+| `spinlokc`, two edits, across the token boundary | 10 117 | **10 117**, 171 ms, 56 836 spans | 3 534 · 0 ms (+187 ms on the top 200) — fuzziness compares whole terms | 6 585 — same |
 | `spin_lock_[a-z]+`, a regex, case folded | 5 471 | **5 471**, 237 ms (22 ms without positions), 24 156 spans | **5 471** on the wildcard field, 1 ms warm — as `[a-zA-Z]+`: Lucene's `case_insensitive` folds a pattern's literals, not its character classes — then **673 ms** more to mark the top 200 | 0 — terms are already cut |
 | `de`, two characters | 100 166 | **100 166**, 7.9 M spans, 587 ms (190 ms for the documents alone) | 0, silently | 0, silently |
-| `ude`, three characters | 74 500 | **74 500**, 106 ms | 68 561 | **74 679** |
+| `ude`, three characters | 74 500 | **74 500**, 106 ms, 478 423 spans | 68 561 · 0 ms (+28 ms on the top 200) | **74 679** · 0 ms |
 | `retur -ENOMEM`, a fuzzy phrase | 14 377 | **14 377**, 40 ms, 31 937 spans | 14 374 (`span_near`), 0 ms — it does this well, then 118 ms more to mark the spans of the top 200 | — |
 | **where it matched**: `mutex_lock`, 5 202 documents | 21 070 spans | **all 21 070, 13 ms** | `highlight` on the top 200: 108 ms | verifying 5 229 stored texts: 96 ms |
 | your index **in your transaction** | — | **yes**: pluggable store, one commit for your rows and the index, rollback included | no: a server next to your database, a synchronisation to write | no: its own directory, its own commit |
