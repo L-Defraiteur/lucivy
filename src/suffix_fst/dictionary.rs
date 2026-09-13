@@ -678,7 +678,23 @@ impl SfxDictionary {
             cache.unverified.fetch_add(1, Relaxed);
         }
         let filter = self.filter(field_id);
+        let (stripe, stripe_hash) = self.shared.stripe(field_id, key);
         if filter.maybe_contains(key.as_bytes()) {
+            // The pending texts first: a text minted since the last fold is
+            // in no part yet, and walking every part (up to 8 generations
+            // and 64 pairs) before asking the pending table was the whole
+            // cost of a pending hit — 6.6 M of them on the kernel. A stale
+            // pending entry (folded, not yet forgotten) holds the same id
+            // the part does. One hash probe under the stripe's lock.
+            {
+                let t_lock = timed.then(std::time::Instant::now);
+                let _lock_guard = t_lock.map(|t| TimeInto(t, &stats::LOCK_NS));
+                if let Some(id) = stripe.lock().unwrap().get(field_id, key.as_bytes(), stripe_hash) {
+                    if timed { stats::PENDING_HITS.fetch_add(1, Relaxed); }
+                    cache.insert(key_hash, id);
+                    return (id, false);
+                }
+            }
             let fst_key = fst_key(text, meta.is_word_stripped, meta.own_len, meta.overlap_len);
             if let Some(id) = self.field(field_id).and_then(|f| f.lookup_with_key(text, meta, &fst_key)) {
                 if timed { stats::HITS.fetch_add(1, Relaxed); }
@@ -690,8 +706,9 @@ impl SfxDictionary {
         }
         let t_lock = timed.then(std::time::Instant::now);
         let _lock_guard = t_lock.map(|t| TimeInto(t, &stats::LOCK_NS));
-        let (stripe, stripe_hash) = self.shared.stripe(field_id, key);
         let mut stripe = stripe.lock().unwrap();
+        // Minted by another writer between the two probes: the same text
+        // gets one id.
         if let Some(id) = stripe.get(field_id, key.as_bytes(), stripe_hash) {
             if timed { stats::PENDING_HITS.fetch_add(1, Relaxed); }
             cache.insert(key_hash, id);
