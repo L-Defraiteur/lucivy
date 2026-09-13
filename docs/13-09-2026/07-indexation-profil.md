@@ -434,6 +434,19 @@ rapports du 11 septembre — dictionnaire 20/21 identiques et la 21ᵉ un ex æq
 coupure du top-10 (comptes, scores et spans égaux), sans positions **21/21** ; rapports
 gardés à côté des références (`parity_10k_{pos,nopos}_collectors.json`).
 
+## 5 octies bis. Les textes en attente avant les parties (13 septembre, nuit)
+
+Le profil du § 5 septies laissait `lookup_or_mint` à 32 % du CPU occupé, dont les
+marches FST 69 s. Un texte minté depuis le dernier repli n'est dans aucune partie, et
+un lookup marchait **toutes** les parties (jusqu'à 8 générations et 64 paires) avant
+d'interroger la table en attente : 6,6 M de lookups du noyau. Désormais, quand le Bloom
+dit « peut-être », une sonde de la table sous le verrou de sa stripe d'abord, puis les
+parties. Noyau entier : marches FST 68 → 38 s de CPU, décodage 23 → 13, lookups 175 →
+157 s, verrou 34 → 42 (une sonde de plus par lookup), mur dans le bruit (34,9 → 34,5 s :
+le plateau est borné par les écrivains, le CPU libéré profite aux finalisations).
+Le compteur `pending` monte de 6,57 à 7,96 M : il compte maintenant aussi les entrées
+périmées qu'un repli n'a pas encore oubliées (même id que la partie).
+
 ## 5 nonies. Un défaut de forme attrapé par l'expérience des 24 fils (13 septembre, nuit)
 
 `LUCIVY_WRITER_THREADS=24` sur le noyau : 36,3 s contre 36,1 à 16 (rien à gagner, les

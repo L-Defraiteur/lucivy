@@ -1,6 +1,14 @@
 Unreleased — branch `v4.3`
 ==========================
 
+- **The pending texts are probed before the FST parts.** A text minted since
+  the last fold is in no part yet, and a lookup walked every part — up to 8
+  generations and 64 pairs — before asking the pending table: 6.6 M such
+  lookups on the kernel. One hash probe under the stripe's lock first, when
+  the Bloom filter says maybe. Whole kernel: FST walks 68 → 38 s of CPU,
+  lookups 175 → 157 s, wall within noise (the writers are the plateau);
+  `pending` now also counts the stale entries a fold has not forgotten yet.
+
 - **Fixed: relaxed matches that ended inside a multi-byte character.** `de`
   with relaxed separators reported `D\n,,“` on the kernel (six spans over 8.2 M,
   every one a letter, separators, then a non-ASCII character), none of them
