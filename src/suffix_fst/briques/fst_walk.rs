@@ -233,7 +233,15 @@ fn keep_in_segment<T: Clone>(items: &[T], id_of: impl Fn(&T) -> u32, gmap: &supe
                 }
             }
         } else if (n as u64) * 8 < m as u64 {
-            // Few map ids: gallop each into the items.
+            // Few map ids: gallop each into the items — and take every item
+            // of that id, not the first: a list holds one item per (ordinal,
+            // suffix), so a token that contains the needle three times
+            // (`0xdedede00` for `de`) is three items of one id. This branch
+            // kept one and lost the other occurrences — only on a segment
+            // small against the list (a shape thing: the whole kernel at 24
+            // writer threads lost 3 spans of `de` over 7.9 M, at 16 none),
+            // in every version since the `.gmap` cut (5 September 2026),
+            // found 13 September at night.
             let mut i = 0usize;
             for j in 0..n {
                 let b = gmap.global(j);
@@ -241,8 +249,9 @@ fn keep_in_segment<T: Clone>(items: &[T], id_of: impl Fn(&T) -> u32, gmap: &supe
                 if i >= m {
                     break;
                 }
-                if id_of(&items[i]) == b {
+                while i < m && id_of(&items[i]) == b {
                     out.push(items[i].clone());
+                    i += 1;
                 }
             }
         } else {
@@ -1340,6 +1349,33 @@ pub fn sibling_chain_dfs(
 
 #[cfg(test)]
 mod tests {
+    /// `keep_in_segment` against a plain filter, on every branch it takes
+    /// (few items, few map ids, merge), with items that repeat an id — one
+    /// per (ordinal, suffix) of a token holding the needle several times.
+    #[test]
+    fn keep_in_segment_keeps_every_item_of_a_repeated_id() {
+        use crate::suffix_fst::gmap::{encode, GmapReader};
+        let naive = |items: &[(u32, u16)], globals: &[u32]| -> Vec<(u32, u16)> {
+            items.iter().copied().filter(|(id, _)| globals.binary_search(id).is_ok()).collect()
+        };
+        // Items: ids 0..600 step 3, each three times (sti 2, 4, 6), sorted by id.
+        let items: Vec<(u32, u16)> = (0..200u32).flat_map(|k| [(k * 3, 2u16), (k * 3, 4), (k * 3, 6)]).collect();
+        let cases: Vec<Vec<u32>> = vec![
+            // few map ids against 600 items: the branch that lost occurrences
+            vec![3, 27, 300, 597],
+            // merge
+            (0..600u32).filter(|g| g % 4 == 0).collect(),
+            // few items: a map of 20 000 ids
+            (0..20_000u32).collect(),
+        ];
+        for globals in cases {
+            let bytes = encode(&globals, None);
+            let gmap = GmapReader::open(&bytes).unwrap();
+            let kept = super::keep_in_segment(&items, |it| it.0, &gmap);
+            assert_eq!(kept, naive(&items, &globals), "map of {} ids", globals.len());
+        }
+    }
+
     use super::*;
     use crate::suffix_fst::builder_v3::SuffixFstBuilderV3;
     use crate::suffix_fst::file_v3::SfxFileWriterV3;

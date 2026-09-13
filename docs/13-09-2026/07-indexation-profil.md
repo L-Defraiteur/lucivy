@@ -434,6 +434,31 @@ rapports du 11 septembre — dictionnaire 20/21 identiques et la 21ᵉ un ex æq
 coupure du top-10 (comptes, scores et spans égaux), sans positions **21/21** ; rapports
 gardés à côté des références (`parity_10k_{pos,nopos}_collectors.json`).
 
+## 5 nonies. Un défaut de forme attrapé par l'expérience des 24 fils (13 septembre, nuit)
+
+`LUCIVY_WRITER_THREADS=24` sur le noyau : 36,3 s contre 36,1 à 16 (rien à gagner, les
+cœurs sont déjà pris par les finalisations), 362 segments — **et `de` strict perd 3
+spans sur 7 929 772**, les mêmes sur deux runs, tous des occurrences répétées de
+l'aiguille dans un jeton (`0xde|de|de00`, `videodev`). La 4.2.0 publiée, rebâtie à
+côté, les perd aussi à 24 fils ; à 12 et 16 fils, rien ; 30 000 fichiers à 24 et 32
+fils, rien. Le jeton est bien indexé (`dedede00` strict : 9 spans exacts) : c'est la
+requête courte, qui avale des milliers de clés, qui perd.
+
+Cause : `keep_in_segment` (`briques/fst_walk.rs`), la coupe d'une liste de candidats
+du shard par le `.gmap` d'un segment, a trois stratégies selon les tailles ; celle
+d'un segment qui tient **peu des ids de la liste** galopait chaque id du segment dans
+la liste et gardait **un seul** item par id — or une liste tient un item par
+(ordinal, suffixe), et un jeton qui contient l'aiguille trois fois, c'est trois items
+d'un même id. La branche prise dépend de la taille du segment face à la liste : d'où
+la forme. Depuis la coupe au `.gmap` (5 septembre), donc dans 4.0.0 à 4.2.0. Corrigé
+(tous les items d'un id répété), test `keep_in_segment_keeps_every_item_of_a_repeated_id`
+sur les trois branches (rouge sur l'ancienne), et sur l'index à 24 fils : `de` strict
+exact, `de` relâché **miss 33 → 0**, `e` strict 60,5 M de spans exacts.
+
+Reste sur ce même index, **sans rapport avec la forme** : `de` relâché rend **6 spans en
+trop**, tous un `d` suivi de séparateurs puis d'un caractère non ASCII
+(`D\n,,“`, ``d`` 文``, `d\n\n取`) — à reproduire en isolation, chantier suivant.
+
 ## 6. Vérification
 
 - `cargo test --release --lib` : 1 471 verts (22 ignorés) ; sans features par
