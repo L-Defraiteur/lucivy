@@ -141,10 +141,10 @@ fn bench_docstore_fetch() {
         for cache in [1usize, 4, 100] {
             let t = Instant::now();
             let mut n = 0usize;
-            for seg in 0..nseg {
-                if by_seg[seg].is_empty() { continue; }
+            for (seg, docs) in by_seg.iter().enumerate() {
+                if docs.is_empty() { continue; }
                 let store = searcher.segment_reader(seg as u32).get_store_reader(cache).unwrap();
-                let mut ids = by_seg[seg].clone();
+                let mut ids = docs.clone();
                 ids.sort_unstable();
                 for doc in ids {
                     let d: LucivyDocument = store.get(doc).unwrap();
@@ -153,6 +153,42 @@ fn bench_docstore_fetch() {
             }
             assert_eq!(text, n);
             eprintln!("verify c{:<3}  {:>8.1} ms", cache, ms(t));
+        }
+    }
+}
+
+/// The same list through `ShardedHandle::fetch_docs` — the path the bindings
+/// take. `SHARDED_DIR` is a directory with `_shard_config.json` and `shard_0`
+/// (a symlink to a single-shard index is enough).
+#[test]
+#[ignore]
+fn bench_sharded_fetch_docs() {
+    use lucivy_core::sharded_handle::ShardedHandle;
+    let dir = std::env::var("SHARDED_DIR").expect("SHARDED_DIR=<dir with shard_0>");
+    let value = std::env::var("BENCH_QUERY").unwrap_or_else(|_| "mutex_lock".into());
+    let rounds: usize = std::env::var("BENCH_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    let t = Instant::now();
+    let h = ShardedHandle::open(&dir).unwrap();
+    eprintln!("open {dir}: {:.1} ms", ms(t));
+    let config: QueryConfig = serde_json::from_value(serde_json::json!({
+        "type": "contains", "field": "content", "value": value, "strict_separators": true
+    })).unwrap();
+    let content = h.schema.get_field("content").unwrap();
+    for round in 0..rounds {
+        let t = Instant::now();
+        let results = h.search(&config, 1_000_000, None).unwrap();
+        eprintln!("--- round {round}: search {:.1} ms, {} hits", ms(t), results.len());
+        let t = Instant::now();
+        let ids = h.node_ids_of(&results).unwrap();
+        eprintln!("node_ids_of {:>8.1} ms  ({} ids)", ms(t), ids.len());
+        let t = Instant::now();
+        let docs = h.fetch_docs(&results).unwrap();
+        let text: usize = docs.iter().map(|d| d.get_first(content).and_then(|v| v.as_value().as_str()).map_or(0, |s| s.len())).sum();
+        eprintln!("fetch_docs  {:>8.1} ms  {:.1} MB of content", ms(t), text as f64 / 1e6);
+        for k in [10usize, 200] {
+            let t = Instant::now();
+            let d = h.fetch_docs(&results[..k.min(results.len())]).unwrap();
+            eprintln!("fetch_docs top-{k:<4} {:>6.2} ms ({} docs)", ms(t), d.len());
         }
     }
 }

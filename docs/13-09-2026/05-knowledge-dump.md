@@ -44,6 +44,13 @@ qu'elle sort en erreur quand elle échoue) :
 bash bindings/emscripten/build.sh                  # WASM : emsdk + nightly, ~1 min en incrémental
 ```
 
+**Document store** : `bench_docstore_fetch.rs` (ignoré) — `V3_INDEX_DIR=<index>
+BENCH_QUERY=mutex_lock cargo test --release -p lucivy-core --test bench_docstore_fetch
+-- --ignored --nocapture` détaille le coût d'un fetch phase par phase ; le test
+`bench_sharded_fetch_docs` (`SHARDED_DIR=<dossier avec _shard_config.json + shard_0>`,
+un lien symbolique vers un index mono-shard suffit) mesure `ShardedHandle::fetch_docs`.
+Lecture : `docs/13-09-2026/06-document-store.md`.
+
 ## 2. Vérité terrain (le harnais)
 
 `lucivy_core/tests/test_sfx_v3_ground_truth.rs`, test `v3_ground_truth_demo`.

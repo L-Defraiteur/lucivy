@@ -1,6 +1,23 @@
 Unreleased
 ==========
 
+- **Reading the documents of a hit list: nothing read unless asked, and read
+  in parallel when it is.** Every binding (Python, Node, C++, the browser) and
+  `ShardedHandle::search_with_docs` fetched the whole stored document of every
+  hit — decompressing its block — just to read `_node_id`, a fast field, even
+  when the caller had not asked for the fields. Measured on the pinned kernel,
+  `mutex_lock`, 5 202 hits weighing 147 MB of text: 114 ms of fetch for 1.6 ms
+  of fast field. Now `_node_id` comes from the fast field and the documents are
+  read only for `fields: true`, through `ShardedHandle::fetch_docs`: sequential
+  under 64 hits, one scheduler task per shard and segment above (luciole, never
+  raw threads — the browser build keeps its single pool). The same 5 202
+  documents: 114 → 15 ms in a fresh process, 14 → 7.5 ms warm; a top-200 costs
+  0.6 ms. Same documents, same order, same fields (`test_fetch_docs`). The
+  document store itself is untouched: LZ4 blocks of 16 KB, and a document
+  larger than its block is its block — the cost of a fetch is the text it
+  decompresses, nothing else (`docs/13-09-2026/06-document-store.md`, bench
+  `bench_docstore_fetch`).
+
 - **The byte spans are only built when someone asks for them.** The prescan
   always materialised one `(document, from, to)` triple per match and cached it,
   whether or not a highlight sink was attached — `de` on the kernel built 7.9
