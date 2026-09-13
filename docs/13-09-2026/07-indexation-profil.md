@@ -387,6 +387,53 @@ sur les plateaux, la libération des sorties du DAG de construction
 `content_overlap` — ce dernier champ de `TokenMetaV3` n'est lu nulle part). Le
 `lookup_or_mint` reste 25 % du CPU occupé.
 
+## 5 octies. Le collecteur, sans allocation par occurrence (13 septembre, nuit) — 39 → 35 s
+
+Ce que le même profil disait du plateau (§ 5 septies, dernier paragraphe), fait :
+
+- **Une entrée de mot par ordinal, pas par occurrence.** `word_stripped_entries`
+  recevait, pour chaque mot de chaque valeur, une `WordStrippedEntry` à deux `String`
+  ; le constructeur de FST les dédoublonnait ensuite. Désormais `mark_ws_entry` : la
+  première occurrence d'un ordinal entre, les suivantes non (idem pour l'entrée de
+  queue des mots très longs). L'estimation mémoire (`WORD_STRIPPED_OVERHEAD`) compte
+  toujours chaque occurrence : le budget qui coupe les segments garde son sens, **308
+  segments avant comme après**, seuls la mémoire et le travail partent.
+- **Les mots d'une valeur sans `BTreeMap`** : les chunks d'un mot sont consécutifs et
+  les mots viennent dans l'ordre, un mot est un intervalle d'indices de chunks
+  (`word_ranges`, un tampon réutilisé) — plus un `Vec<usize>` par mot.
+- **Tampons réutilisés** (`AddValueScratch`) pour le texte étendu de chaque chunk,
+  le contenu du mot, son recouvrement de contenu et sa clé — plus de `format!` ni de
+  `to_string` par chunk ou par mot.
+- **`TokenMetaV3::content_overlap` supprimé** : une `Option<String>` calculée et
+  clonée par chunk, stockée par ordinal, lue nulle part.
+
+**Ce que le contrôle à l'octet a montré.** Un seul fil d'écriture, un seul commit,
+3 000 fichiers, ancien binaire contre nouveau : dictionnaire **83/83 fichiers
+identiques** ; v3, 81/85 — les quatre `.sfx` du champ contenu diffèrent, et
+`diff_two_sfx_files` (test ignoré de `file_v3.rs`, `SFX_A`/`SFX_B`) dit exactement
+quoi : mêmes clés, mêmes nombres de parents, mais pour 6 947 clés un parent
+mot-dépouillé change de `(own_len, sep_len)` — `0x00000000` suivi de `\n\t\t` (13, 3)
+ou d'une espace (11, 1). Un mot suivi de séparateurs différents est **un seul ordinal**
+(`intern_shape` ignore le séparateur pour la partition 0x02), et l'ancien code poussait
+une entrée par occurrence avec ses propres séparateurs : le record de la FST gardait
+celle que le constructeur voyait en dernier, **en désaccord avec `.termtexts`**, qui
+enregistre la première. Le record porte désormais la première, comme `.termtexts`.
+Test `one_word_entry_per_ordinal_with_the_first_occurrence_shape`. (Un premier jet
+coupait aussi la recherche du recouvrement de contenu au premier mot suivant même
+sans contenu utilisable — 102 ids de moins sur 10 000 fichiers : la règle de toujours,
+« un mot suivant dont le premier caractère ne tient pas dans `overlap` octets ne donne
+rien, on passe au mot d'après », est restaurée et commentée.)
+
+**Mesuré.** Noyau entier, alterné deux fois contre le binaire des époques : 39,7 / 38,5
+→ **35,6 / 34,9 s**, `minted` et `pending` identiques, 308 segments, finalisations
+cumulées 181-184 → 165-168 s, mêmes comptes de requêtes. (Une première mesure isolée
+disait 45,3 s : bruit de machine — d'où l'alternance.) Mono-fil, 3 000 fichiers : v3
+2,6 → 1,8 s, dictionnaire 2,8 → 2,4 s. Panels de vérité terrain 10/10 dans les trois
+dispositions. **Chrome, 10 000 fichiers** : panel de parité de 21 requêtes contre les
+rapports du 11 septembre — dictionnaire 20/21 identiques et la 21ᵉ un ex æquo à la
+coupure du top-10 (comptes, scores et spans égaux), sans positions **21/21** ; rapports
+gardés à côté des références (`parity_10k_{pos,nopos}_collectors.json`).
+
 ## 6. Vérification
 
 - `cargo test --release --lib` : 1 471 verts (22 ignorés) ; sans features par

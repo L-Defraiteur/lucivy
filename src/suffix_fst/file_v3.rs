@@ -795,6 +795,45 @@ mod tests {
     }
 
     /// Measurement, not a check: parent-list sizes by key length in a real
+    /// Diff two version-8 `.sfx` files key by key (`SFX_A`, `SFX_B`): keys
+    /// held by one only, and keys whose parent sets differ — with the first
+    /// few spelled out. What settles whether a collector change altered the
+    /// segments it writes.
+    #[test]
+    #[ignore]
+    fn diff_two_sfx_files() {
+        use lucivy_fst::{IntoStreamer, Streamer};
+        let (Ok(a), Ok(b)) = (std::env::var("SFX_A"), std::env::var("SFX_B")) else { eprintln!("SFX_A / SFX_B unset"); return };
+        let ra = SfxFileReaderV3::open(&std::fs::read(&a).unwrap()).unwrap();
+        let rb = SfxFileReaderV3::open(&std::fs::read(&b).unwrap()).unwrap();
+        let mut keys_a = std::collections::BTreeMap::new();
+        let mut st = ra.fst().stream();
+        while let Some((k, v)) = st.next() { keys_a.insert(k.to_vec(), v); }
+        let mut keys_b = std::collections::BTreeMap::new();
+        let mut st = rb.fst().stream();
+        while let Some((k, v)) = st.next() { keys_b.insert(k.to_vec(), v); }
+        let only_a = keys_a.keys().filter(|k| !keys_b.contains_key(*k)).count();
+        let only_b = keys_b.keys().filter(|k| !keys_a.contains_key(*k)).count();
+        eprintln!("{} keys in A, {} in B; {only_a} only in A, {only_b} only in B", keys_a.len(), keys_b.len());
+        let mut shown = 0; let mut differ = 0;
+        let sig = |p: &ParentEntryV3| (p.raw_ordinal, p.sti, p.own_len, p.sep_len, p.overlap_len, p.overlap, p.is_word_start);
+        for (k, va) in &keys_a {
+            let Some(vb) = keys_b.get(k) else { if shown < 5 { eprintln!("only A: {:?}", String::from_utf8_lossy(k)); shown += 1; } continue };
+            let mut pa: Vec<_> = ra.decode_parents(*va, k).iter().map(sig).collect(); pa.sort();
+            let mut pb: Vec<_> = rb.decode_parents(*vb, k).iter().map(sig).collect(); pb.sort();
+            if pa != pb {
+                differ += 1;
+                if shown < 12 {
+                    shown += 1;
+                    let da: Vec<_> = pa.iter().filter(|p| !pb.contains(p)).collect();
+                    let db: Vec<_> = pb.iter().filter(|p| !pa.contains(p)).collect();
+                    eprintln!("key {:?}: A {} parents, B {} parents; only A {:?}; only B {:?}", String::from_utf8_lossy(k), pa.len(), pb.len(), da, db);
+                }
+            }
+        }
+        eprintln!("{differ} keys with different parents");
+    }
+
     /// Shape of the parents table of a version-8 `.sfx` (path in
     /// `SFX_FILE`): flat against grouped records, groups and parents per
     /// grouped record, and the parents at `sti` 0 — what a dictionary lookup

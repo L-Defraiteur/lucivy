@@ -849,7 +849,7 @@ mod tests {
     use super::*;
 
     fn meta(own_len: u16) -> TokenMetaV3 {
-        TokenMetaV3 { own_len, sep_len: 0, overlap_len: 0, is_word_start: true, word_id: 0, content_overlap: None, is_word_stripped: false }
+        TokenMetaV3 { own_len, sep_len: 0, overlap_len: 0, is_word_start: true, word_id: 0, is_word_stripped: false }
     }
 
     /// The pending texts live by commit epoch: a commit that starts turns

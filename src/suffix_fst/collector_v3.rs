@@ -71,8 +71,18 @@ pub struct SfxCollectorV3 {
     token_postings: Vec<Vec<(u32, u32, u32, u32)>>,
     // Metadata per interned ordinal (from first occurrence).
     token_meta: Vec<TokenMetaV3>,
-    // Word-level stripped entries, built during add_value().
+    /// Word-level stripped entries, one per word-stripped intern ordinal
+    /// (the first occurrence's — every field the builders read derives from
+    /// the key and the shape). One per *occurrence* until 13 September
+    /// 2026: two `String`s per word of every value, deduplicated by the
+    /// FST builder afterwards.
     word_stripped_entries: Vec<WordStrippedEntry>,
+    /// Per intern ordinal: whether `word_stripped_entries` already names it.
+    ws_entry_pushed: Vec<bool>,
+    /// Scratch buffers of `add_value`, reused across values: the extended
+    /// chunk text, the word's content, its content overlap, the word entry's
+    /// key, and the chunk ranges of the value's words.
+    scratch: AddValueScratch,
     // Direct word postings: (doc_id, first_ti, last_ti, byte_from, byte_to)
     // indexed by ws intern_ord. Captured directly in add_value() where we know
     // the exact word identity — eliminates the lossy content_key join.
@@ -140,13 +150,23 @@ pub struct TokenMetaV3 {
     pub is_word_start: bool,
     /// Index of the word this chunk belongs to, within its value (from the tokenizer).
     pub word_id: usize,
-    /// Content-aware overlap for stripped partition: first 2 bytes of the next
-    /// CONTENT token (skipping pure-sep tokens). None if same as normal overlap
-    /// or if the token has no trailing sep.
-    pub content_overlap: Option<String>,
     /// True if this token was interned for a word-stripped entry (partition 0x02 only).
     /// Excluded from the build loop for partitions 0x00/0x01.
     pub is_word_stripped: bool,
+}
+
+/// The buffers `add_value` reuses from one value to the next.
+#[derive(Default)]
+struct AddValueScratch {
+    extended: String,
+    word_content: String,
+    content_overlap: String,
+    ws_extended: String,
+    chunk_posting_info: Vec<(u32, u32, u32, u32)>,
+    chunk_intern_ids: Vec<u32>,
+    /// `(word_id, first chunk, one past the last chunk)` of the value's words.
+    word_ranges: Vec<(usize, usize, usize)>,
+    ws_intern_sequence: Vec<(u32, u16)>,
 }
 
 impl Default for SfxCollectorV3 {
@@ -170,6 +190,8 @@ impl SfxCollectorV3 {
             token_postings: Vec::new(),
             token_meta: Vec::new(),
             word_stripped_entries: Vec::new(),
+            ws_entry_pushed: Vec::new(),
+            scratch: AddValueScratch::default(),
             word_postings: Vec::new(),
             sibling_pairs: Vec::new(), // (intern_a, intern_b)
             positions: true,
@@ -230,10 +252,16 @@ impl SfxCollectorV3 {
         let num_chunks = chunks.len();
         // Track byte offsets in original text
         let mut offset = 0usize;
+        // The scratch buffers, taken for the duration of the call (the
+        // intern step borrows `self` mutably).
+        let mut scratch = std::mem::take(&mut self.scratch);
         // Per-chunk posting info: (doc_id, ti, byte_from, byte_to) for word-stripped
-        let mut chunk_posting_info: Vec<(u32, u32, u32, u32)> = Vec::with_capacity(num_chunks);
+        let chunk_posting_info = &mut scratch.chunk_posting_info;
+        chunk_posting_info.clear();
         // Per-chunk intern ids for sibling pairs and word-stripped entries
-        let mut chunk_intern_ids: Vec<u32> = Vec::with_capacity(num_chunks);
+        let chunk_intern_ids = &mut scratch.chunk_intern_ids;
+        chunk_intern_ids.clear();
+        let extended = &mut scratch.extended;
 
         for i in 0..num_chunks {
             let (ref chunk_text, ref meta) = chunks[i];
@@ -253,51 +281,21 @@ impl SfxCollectorV3 {
             };
             let overlap_len = overlap_bytes.len() as u8;
 
-            // Compute content-aware overlap: skip pure-sep chunks, take from
-            // the next chunk that has alphanumeric content. Used by partition 0x02.
-            let content_overlap: Option<String> = if meta.sep_len > 0 {
-                let mut co = String::new();
-                for j in (i + 1)..num_chunks {
-                    let (ref next_text, ref next_meta) = chunks[j];
-                    if next_meta.content_len > 0 {
-                        // Found content — take first `overlap` bytes
-                        let ov_len = self.overlap.min(next_text.len());
-                        let mut end = ov_len;
-                        while end > 0 && !next_text.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        co = next_text[..end].to_string();
-                        break;
-                    }
-                    // Pure-sep chunk — skip
-                }
-                if co == overlap_bytes {
-                    None // Same as the normal overlap (or both empty): nothing separate to keep
-                } else {
-                    Some(co)
-                }
-            } else {
-                None // No sep in this token, no need for content overlap
-            };
-
             // Build extended token: chunk + normal overlap
-            let extended = if overlap_len > 0 {
-                format!("{chunk_text}{overlap_bytes}")
-            } else {
-                chunk_text.clone()
-            };
+            extended.clear();
+            extended.push_str(chunk_text);
+            extended.push_str(overlap_bytes);
 
             let own_len = chunk_len as u16;
             let ti = self.current_value_ti_start + i as u32;
 
             // Intern the extended token
-            let intern_id = self.intern_extended(&extended, TokenMetaV3 {
+            let intern_id = self.intern_extended(extended, TokenMetaV3 {
                 own_len,
                 sep_len: meta.sep_len as u8,
                 overlap_len,
                 is_word_start: meta.is_word_start,
                 word_id: meta.word_id,
-                content_overlap: content_overlap.clone(),
                 is_word_stripped: false,
             });
 
@@ -344,20 +342,31 @@ impl SfxCollectorV3 {
         // Build word-level stripped entries from this value's chunks.
         // Group by word_id, concatenate content, find content_overlap to next word.
         {
-            let mut words_in_value: std::collections::BTreeMap<usize, Vec<usize>> =
-                std::collections::BTreeMap::new();
+            // The chunks of a word are consecutive and the words come in
+            // order (the tokenizer numbers them as it splits): a word is a
+            // range of chunk indices. (A `BTreeMap<word, Vec<chunk>>` per
+            // value, before 13 September 2026, was an allocation per word.)
+            let word_ranges = &mut scratch.word_ranges;
+            word_ranges.clear();
             for (i, (_, meta)) in chunks.iter().enumerate() {
-                words_in_value.entry(meta.word_id).or_default().push(i);
+                match word_ranges.last_mut() {
+                    Some((wid, _, end)) if *wid == meta.word_id => *end = i + 1,
+                    _ => word_ranges.push((meta.word_id, i, i + 1)),
+                }
             }
 
-            let word_ids: Vec<usize> = words_in_value.keys().copied().collect();
-            let mut ws_intern_sequence: Vec<(u32, u16)> = Vec::new(); // (intern_ord, content_len)
-            for (wi, &word_id) in word_ids.iter().enumerate() {
-                let chunk_idxs = &words_in_value[&word_id];
+            let word_content = &mut scratch.word_content;
+            let content_overlap = &mut scratch.content_overlap;
+            let ws_extended = &mut scratch.ws_extended;
+            let ws_intern_sequence = &mut scratch.ws_intern_sequence; // (intern_ord, content_len)
+            ws_intern_sequence.clear();
+            for wi in 0..word_ranges.len() {
+                let (_, first_ci, end_ci) = word_ranges[wi];
+                let last_ci = end_ci - 1;
 
                 // Concatenate content bytes
-                let mut word_content = String::new();
-                for &ci in chunk_idxs {
+                word_content.clear();
+                for ci in first_ci..end_ci {
                     let (ref ct, ref cm) = chunks[ci];
                     let clen = cm.content_len.min(ct.len());
                     word_content.push_str(&ct[..clen]);
@@ -366,11 +375,14 @@ impl SfxCollectorV3 {
                     continue;
                 }
 
-                // Content overlap: first bytes of the next word's first content chunk
-                let mut content_overlap = String::new();
-                for next_wi in (wi + 1)..word_ids.len() {
-                    let next_idxs = &words_in_value[&word_ids[next_wi]];
-                    for &ci in next_idxs {
+                // Content overlap: first bytes of the next word's first content
+                // chunk. A next word whose first character does not fit in
+                // `overlap` bytes gives nothing, and the word after it is
+                // tried — as the format has always done (the keys on disk
+                // depend on it).
+                content_overlap.clear();
+                for &(_, next_first, next_end) in &word_ranges[wi + 1..] {
+                    for ci in next_first..next_end {
                         let (ref ct, ref cm) = chunks[ci];
                         if cm.content_len > 0 {
                             let ov_len = self.overlap.min(cm.content_len).min(ct.len());
@@ -378,35 +390,29 @@ impl SfxCollectorV3 {
                             while end > 0 && !ct.is_char_boundary(end) {
                                 end -= 1;
                             }
-                            content_overlap = ct[..end].to_string();
+                            content_overlap.push_str(&ct[..end]);
                             break;
                         }
                     }
                     if !content_overlap.is_empty() { break; }
                 }
 
-                let first_ci = chunk_idxs[0];
-                let last_ci = *chunk_idxs.last().unwrap();
-
                 // Intern the word-stripped entry as its OWN token (not reusing the
                 // first chunk's ordinal). The key is word_content + content_overlap,
                 // which is unique per word and won't collide with chunk keys.
                 // This ensures "include" and "inclusive" get distinct ordinals.
-                let ws_extended = if !content_overlap.is_empty() {
-                    format!("{word_content}{content_overlap}")
-                } else {
-                    word_content.clone()
-                };
+                ws_extended.clear();
+                ws_extended.push_str(word_content);
+                ws_extended.push_str(content_overlap);
                 // Saturating: a word beyond u16 must still read back as "long",
                 // the STATS section of `.termtexts` depends on it.
                 let ws_own_len = (word_content.len() + chunks[last_ci].1.sep_len).min(u16::MAX as usize) as u16;
-                let ws_intern = self.intern_extended(&ws_extended, TokenMetaV3 {
+                let ws_intern = self.intern_extended(ws_extended, TokenMetaV3 {
                     own_len: ws_own_len,
                     sep_len: chunks[last_ci].1.sep_len as u8,
                     overlap_len: content_overlap.len() as u8,
                     is_word_start: chunks[first_ci].1.is_word_start,
                     word_id: chunks[first_ci].1.word_id,
-                    content_overlap: Some(content_overlap.clone()),
                     is_word_stripped: true,
                 });
                 // NO chunk-level posting here. Word postings are captured directly
@@ -414,18 +420,23 @@ impl SfxCollectorV3 {
 
                 let max_token = crate::tokenizer::equal_chunk::DEFAULT_MAX_TOKEN;
 
+                // The estimate still counts every occurrence: the budget that
+                // cuts segments keeps its meaning (same segments as before),
+                // only the memory and the work go.
                 self.mem_estimate += WORD_STRIPPED_OVERHEAD;
-                self.word_stripped_entries.push(WordStrippedEntry {
-                    word_content: word_content.clone(),
-                    content_overlap: content_overlap.clone(),
-                    first_intern_ord: ws_intern,
-                    first_chunk_intern_ord: chunk_intern_ids[first_ci],
-                    last_chunk_intern_ord: chunk_intern_ids[last_ci],
-                    first_own_len: ws_own_len,
-                    last_sep_len: chunks[last_ci].1.sep_len as u8,
-                    is_word_start: chunks[first_ci].1.is_word_start,
-                    num_chunks: chunk_idxs.len() as u32,
-                });
+                if self.mark_ws_entry(ws_intern) {
+                    self.word_stripped_entries.push(WordStrippedEntry {
+                        word_content: word_content.clone(),
+                        content_overlap: content_overlap.clone(),
+                        first_intern_ord: ws_intern,
+                        first_chunk_intern_ord: chunk_intern_ids[first_ci],
+                        last_chunk_intern_ord: chunk_intern_ids[last_ci],
+                        first_own_len: ws_own_len,
+                        last_sep_len: chunks[last_ci].1.sep_len as u8,
+                        is_word_start: chunks[first_ci].1.is_word_start,
+                        num_chunks: (end_ci - first_ci) as u32,
+                    });
+                }
 
                 // Capture word posting directly — we know the exact word identity here.
                 let first_posting = &chunk_posting_info[first_ci];
@@ -481,7 +492,6 @@ impl SfxCollectorV3 {
                         overlap_len: content_overlap.len() as u8,
                         is_word_start: false,
                         word_id: chunks[last_ci].1.word_id,
-                        content_overlap: Some(content_overlap.clone()),
                         is_word_stripped: true,
                     });
                     // NO chunk-level posting. Tail word posting captured below.
@@ -496,22 +506,24 @@ impl SfxCollectorV3 {
                     // of the kernel pointed at a separator-only chunk while
                     // `byte_from` said the chunk before (5 September 2026).
                     let tail_from = first_posting.2 + ts as u32;
-                    let tail_first_ci = chunk_idxs.iter().copied()
+                    let tail_first_ci = (first_ci..end_ci)
                         .find(|&ci| { let p = &chunk_posting_info[ci]; p.2 <= tail_from && tail_from < p.3 })
                         .unwrap_or(last_ci);
 
                     self.mem_estimate += WORD_STRIPPED_OVERHEAD;
-                    self.word_stripped_entries.push(WordStrippedEntry {
-                        word_content: tail_content,
-                        content_overlap,
-                        first_intern_ord: tail_intern,
-                        first_chunk_intern_ord: chunk_intern_ids[tail_first_ci],
-                        last_chunk_intern_ord: chunk_intern_ids[last_ci],
-                        first_own_len: tail_own_len,
-                        last_sep_len: chunks[last_ci].1.sep_len as u8,
-                        is_word_start: false,
-                        num_chunks: (last_ci - tail_first_ci + 1) as u32,
-                    });
+                    if self.mark_ws_entry(tail_intern) {
+                        self.word_stripped_entries.push(WordStrippedEntry {
+                            word_content: tail_content,
+                            content_overlap: content_overlap.clone(),
+                            first_intern_ord: tail_intern,
+                            first_chunk_intern_ord: chunk_intern_ids[tail_first_ci],
+                            last_chunk_intern_ord: chunk_intern_ids[last_ci],
+                            first_own_len: tail_own_len,
+                            last_sep_len: chunks[last_ci].1.sep_len as u8,
+                            is_word_start: false,
+                            num_chunks: (last_ci - tail_first_ci + 1) as u32,
+                        });
+                    }
 
                     while self.word_postings.len() <= tail_intern as usize {
                         self.word_postings.push(Vec::new());
@@ -543,6 +555,21 @@ impl SfxCollectorV3 {
 
         // Advance: tokens + 1 boundary gap between values
         self.current_value_ti_start += num_chunks as u32 + 1;
+        self.scratch = scratch;
+    }
+
+    /// True the first time a word-stripped intern ordinal is seen: its
+    /// entry goes to `word_stripped_entries` then, and never again.
+    fn mark_ws_entry(&mut self, intern: u32) -> bool {
+        let i = intern as usize;
+        if i >= self.ws_entry_pushed.len() {
+            self.ws_entry_pushed.resize(i + 1, false);
+        }
+        if self.ws_entry_pushed[i] {
+            return false;
+        }
+        self.ws_entry_pushed[i] = true;
+        true
     }
 
     /// Close the current document and advance to the next doc_id.
@@ -1279,6 +1306,37 @@ mod tests {
         c.end_doc();
 
         assert_eq!(c.num_docs(), 1);
+    }
+
+    /// One word entry per word-stripped ordinal, the first occurrence's —
+    /// and its shape is the one `.termtexts` records for that ordinal. A
+    /// word followed by different separators is one ordinal (the separator
+    /// is not in the intern key); until 13 September 2026 every occurrence
+    /// pushed an entry with its own separator length, and the FST record
+    /// kept whichever the builder saw last, disagreeing with `.termtexts`.
+    #[test]
+    fn one_word_entry_per_ordinal_with_the_first_occurrence_shape() {
+        let mut c = SfxCollectorV3::new();
+        c.begin_doc();
+        c.add_value("value 0x00000000\n\t\tnext");
+        c.end_doc();
+        c.begin_doc();
+        c.add_value("value 0x00000000 next");
+        c.end_doc();
+        c.begin_doc();
+        c.add_value("value 0x00000000\n\t\tnext");
+        c.end_doc();
+        let data = c.into_data();
+        let mut per_ordinal = std::collections::HashMap::new();
+        for ws in &data.word_stripped {
+            assert!(per_ordinal.insert(ws.first_intern_ord, ws).is_none(), "ordinal {} entered twice", ws.first_intern_ord);
+            let final_ord = data.intern_to_final[ws.first_intern_ord as usize] as usize;
+            assert_eq!(ws.first_own_len, data.own_lens[final_ord], "entry {:?}: own_len differs from the ordinal's meta", ws.word_content);
+            assert_eq!(ws.last_sep_len, data.token_meta[ws.first_intern_ord as usize].sep_len);
+        }
+        let zeros: Vec<_> = data.word_stripped.iter().filter(|w| w.word_content == "0x00000000").collect();
+        assert_eq!(zeros.len(), 1, "one ordinal for the word whatever follows it");
+        assert_eq!((zeros[0].first_own_len, zeros[0].last_sep_len), (13, 3), "the first occurrence's separators");
     }
 
     #[test]
