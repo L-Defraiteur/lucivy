@@ -128,7 +128,7 @@ pub struct SfxCollectorV3 {
     /// Global id per intern ordinal (dictionary mode).
     global_ids: Vec<u64>,
     /// Whether this collector minted the id (dictionary mode): its text
-    /// goes to `.newtexts`.
+    /// goes to `.minted.termtexts`.
     minted: Vec<bool>,
 
     // Config
@@ -766,7 +766,7 @@ impl SfxCollectorV3 {
         let mut tokens_vec: Vec<String> = Vec::with_capacity(order.len());
         let mut own_lens: Vec<u16> = Vec::with_capacity(order.len());
         let mut globals: Vec<u32> = Vec::with_capacity(if dictionary_mode { order.len() } else { 0 });
-        let mut newtexts: Vec<(u32, String, TermMetaV3)> = Vec::new();
+        let mut minted_texts: Vec<(u32, String, TermMetaV3)> = Vec::new();
         let mut token_postings = self.token_postings;
         // Word-stripped entries whose word postings are written once ordinals exist.
         let mut deferred_ws: Vec<u32> = Vec::new();
@@ -780,7 +780,7 @@ impl SfxCollectorV3 {
                 debug_assert!(global <= u32::MAX as u64, "global id beyond u32");
                 globals.push(global as u32);
                 if self.minted[io] {
-                    newtexts.push((global as u32, self.token_texts[io].clone(), TermMetaV3 {
+                    minted_texts.push((global as u32, self.token_texts[io].clone(), TermMetaV3 {
                         own_len: m.own_len,
                         sep_len: m.sep_len,
                         overlap_len: m.overlap_len,
@@ -890,7 +890,7 @@ impl SfxCollectorV3 {
             word_pos_map: word_pos_map_data,
             sibling_v3: sibling_v3_data,
             globals: if dictionary_mode { Some(globals) } else { None },
-            newtexts,
+            minted_texts,
             max_word_content_len,
             positions: self.positions,
         }
@@ -982,8 +982,8 @@ pub struct SfxCollectorDataV3 {
     /// the `.gmap`). `None` for a segment with its own dictionary.
     pub globals: Option<Vec<u32>>,
     /// Shard dictionary mode: the ids this segment minted, with their text
-    /// and meta (the `.newtexts`), in id order.
-    pub newtexts: Vec<(u32, String, TermMetaV3)>,
+    /// and meta (the `.minted.termtexts`), in id order.
+    pub minted_texts: Vec<(u32, String, TermMetaV3)>,
     /// Longest word-stripped content of the segment, when known: written
     /// in the `.gmap` of a dictionary segment (`.termtexts` STATS otherwise).
     pub max_word_content_len: Option<u16>,

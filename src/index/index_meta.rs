@@ -427,8 +427,9 @@ pub struct SfxDictionaryMeta {
     pub next_ids: std::collections::BTreeMap<u32, u64>,
     /// Fields with a dictionary.
     pub field_ids: Vec<u32>,
-    /// Segments whose own dictionary pair (`<uuid>.<field>.newsfx` and
-    /// `.newtexts`: the FST and texts of the ids they minted, built on their
+    /// Segments whose own dictionary pair (`<uuid>.<field>.minted.sfx` and
+    /// `.minted.termtexts` — `.newsfx` / `.newtexts` before 4.3 —: the FST
+    /// and texts of the ids they minted, built on their
     /// build thread) is a live part of the dictionary, not yet folded into a
     /// generation. A commit names its new segments here and returns; a
     /// background fold merges them into the next generation and the next
@@ -451,9 +452,9 @@ impl SfxDictionaryMeta {
 
     /// The dictionary pair of one pending segment, per field.
     pub fn pair_files(&self, segment_uuid: &str) -> Vec<PathBuf> {
+        // Both names: the inventory keeps whichever exists.
         self.field_ids.iter().flat_map(|&f| {
-            [PathBuf::from(format!("{segment_uuid}.{f}.newsfx")),
-             PathBuf::from(format!("{segment_uuid}.{f}.newtexts"))]
+            crate::suffix_fst::dictionary::pair_file_names(segment_uuid, f).into_iter().flat_map(|(a, b)| [a, b])
         }).collect()
     }
 

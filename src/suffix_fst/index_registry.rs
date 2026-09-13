@@ -122,7 +122,7 @@ pub fn all_indexes() -> Vec<Box<dyn SfxIndexFile>> {
         // Sibling table v3 (prebuilt by DAG, chunk + word siblings)
         Box::new(SiblingV3Index),
         // Shard dictionary (sfx_version 4): local → global ids. The
-        // `.newtexts` a segment also writes (the texts of the ids it minted)
+        // `.minted.termtexts` a segment also writes (the texts of the ids it minted)
         // is deliberately NOT a registry file: the commit consumes it and
         // deletes it, so it must be listed nowhere — not in the segment's
         // file set (snapshot, delta, GC) and not opened by readers. It

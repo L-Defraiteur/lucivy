@@ -48,7 +48,7 @@ const SECTION_STATS: u16 = 0x03;
 const SECTION_ENTRIES: u16 = 0x04;
 const SECTION_ENTRIES3: u16 = 0x05;
 /// The global ids the entries stand for, as runs, when the file is one
-/// generation of a shard dictionary (or a segment's `.newtexts`): entry `i`
+/// generation of a shard dictionary (or a segment's `.minted.termtexts`): entry `i`
 /// is id `run.start + (i - run.first_index)`. Absent = entry `i` is id `i`.
 /// `[u32 runs]` then `[u32 start][u32 len]` per run, ascending.
 const SECTION_IDS: u16 = 0x06;
@@ -652,7 +652,7 @@ impl<'a> TermTextsReaderV3<'a> {
 
     /// Iterate all entries of every file: (global id, text, meta).
     /// The ids of every entry, across the parts, without reading a text —
-    /// what a commit needs from a segment's `.newtexts` (decoding 950 000
+    /// what a commit needs from a segment's `.minted.termtexts` (decoding 950 000
     /// texts for their ids alone was 2 s of commit path on 30 000 files).
     pub fn ids(&self) -> impl Iterator<Item = u32> + '_ {
         std::iter::once(self).chain(self.more.iter()).flat_map(|part| match &part.id_runs {

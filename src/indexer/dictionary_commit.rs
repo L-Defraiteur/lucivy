@@ -1,7 +1,7 @@
 //! The shard dictionary's generations, written around the commit.
 //!
 //! On a `sfx_version` 4 index every segment writes, next to its postings,
-//! the pair `<uuid>.<field>.newsfx` / `.newtexts`: the suffix FST and the
+//! the pair `<uuid>.<field>.minted.sfx` / `.minted.termtexts` (`.newsfx` / `.newtexts` before 4.3): the suffix FST and the
 //! texts of the ids it minted, built on its own build thread — the same
 //! shape as a generation of the dictionary. A commit does **not** merge
 //! them: it names the new segments in `SfxDictionaryMeta::pending_segments`,
@@ -30,12 +30,11 @@
 //! Ids are stable and append-only, so a fold changes no segment.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::directory::Directory;
 use crate::index::Index;
-use crate::suffix_fst::dictionary::{decode_newtexts, DICTIONARY_SFX_VERSION, SfxDictionary};
+use crate::suffix_fst::dictionary::{decode_minted_texts, find_pair, pair_file_names, DICTIONARY_SFX_VERSION, SfxDictionary, LEGACY_MINTED_SFX_EXT, LEGACY_MINTED_TEXTS_EXT, MINTED_SFX_EXT, MINTED_TEXTS_EXT};
 use crate::suffix_fst::dictionary_compact::{choose_compaction, compact_generations, compact_parts, generation_bytes, generation_sfx_bytes, remove_leftovers, write_generation};
 use crate::suffix_fst::termtexts_v3::TermTextsReaderV3;
 use common::OwnedBytes;
@@ -85,7 +84,7 @@ pub(crate) fn fold_new_texts(
         .iter().map(|m| m.id()).collect();
 
     // The new segments and their pair — built now, from the texts, for a
-    // segment written before `.newsfx` existed. (The pending texts they
+    // segment written before the minted FST existed. (The pending texts they
     // minted are released by epoch, `forget_committed_pending`: no set of
     // their ids to build.)
     let mut new_pending: Vec<String> = Vec::new();
@@ -100,18 +99,22 @@ pub(crate) fn fold_new_texts(
         let uuid = meta.id().uuid_string();
         let mut has_pair = false;
         for &field_id in meta.sfx_field_ids() {
-            let Ok(slice) = segment.open_read_custom(&format!("{field_id}.newtexts")) else { continue };
+            // The current name, or the one before 4.3 (a segment written by
+            // an older writer and folded by this one).
+            let Some((legacy, slice)) = segment.open_read_custom(&format!("{field_id}.{MINTED_TEXTS_EXT}")).ok().map(|s| (false, s))
+                .or_else(|| segment.open_read_custom(&format!("{field_id}.{LEGACY_MINTED_TEXTS_EXT}")).ok().map(|s| (true, s))) else { continue };
             let texts = slice.read_bytes()?;
             let Some(reader) = TermTextsReaderV3::open(&texts) else { continue };
             if reader.num_terms() == 0 { continue; }
             new_texts += reader.num_terms() as usize;
             has_pair = true;
             if !new_fields.contains(&field_id) { new_fields.push(field_id); }
-            if segment.open_read_custom(&format!("{field_id}.newsfx")).is_err() {
-                let entries = decode_newtexts(&texts).unwrap_or_default();
+            let sfx_ext = if legacy { LEGACY_MINTED_SFX_EXT } else { MINTED_SFX_EXT };
+            if segment.open_read_custom(&format!("{field_id}.{sfx_ext}")).is_err() {
+                let entries = decode_minted_texts(&texts).unwrap_or_default();
                 let sfx = generation_sfx_bytes(&entries).map_err(|e| crate::LucivyError::SystemError(
                     format!("segment {uuid} field {field_id}: dictionary FST: {e}")))?;
-                let mut w = segment.open_write_custom(&format!("{field_id}.newsfx"))?;
+                let mut w = segment.open_write_custom(&format!("{field_id}.{sfx_ext}"))?;
                 use std::io::Write;
                 use common::TerminatingWrite;
                 w.write_all(&sfx)?;
@@ -242,9 +245,8 @@ fn fold_once(index: &Index, verbose: bool) -> crate::Result<bool> {
         let mut sfx_parts: Vec<OwnedBytes> = Vec::new();
         let mut termtexts_parts: Vec<OwnedBytes> = Vec::new();
         for uuid in &snapshot.pending_segments {
-            let sfx = directory.open_read(&PathBuf::from(format!("{uuid}.{field_id}.newsfx")));
-            let termtexts = directory.open_read(&PathBuf::from(format!("{uuid}.{field_id}.newtexts")));
-            let (Ok(sfx), Ok(termtexts)) = (sfx, termtexts) else { continue };
+            let Some((sfx_path, texts_path)) = find_pair(directory, uuid, field_id) else { continue };
+            let (Ok(sfx), Ok(termtexts)) = (directory.open_read(&sfx_path), directory.open_read(&texts_path)) else { continue };
             sfx_parts.push(sfx.read_bytes()?);
             termtexts_parts.push(termtexts.read_bytes()?);
         }
@@ -322,8 +324,7 @@ pub(crate) fn delete_consumed_pairs(shared: &Arc<SegmentUpdaterShared>) -> crate
             continue;
         }
         for &field_id in meta.sfx_field_ids() {
-            for ext in ["newtexts", "newsfx"] {
-                let path = PathBuf::from(format!("{uuid}.{field_id}.{ext}"));
+            for path in pair_file_names(&uuid, field_id).into_iter().flat_map(|(a, b)| [a, b]) {
                 match index.directory().delete(&path) {
                     Ok(()) | Err(crate::directory::error::DeleteError::FileDoesNotExist(_)) => {}
                     Err(e) => return Err(crate::LucivyError::SystemError(

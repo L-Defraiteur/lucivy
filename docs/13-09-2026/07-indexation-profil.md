@@ -495,6 +495,27 @@ Vérité : `test_relaxed_multibyte`, panels 10/10, `de` relâché exact sur le n
 et à 16 (`e` relâché, `ude` relâché aussi), **Chrome 10 000 fichiers : panel de parité
 21/21 identiques dans les deux dispositions** (rapports `parity_10k_{pos,nopos}_relaxedfix.json`).
 
+## 5 decies. Essayé et retiré : la paire dans son propre nœud du DAG (14 septembre)
+
+La FST de la paire d'un segment (`.minted.sfx`) était bâtie dans le nœud d'assemblage,
+après les postings ; dans son propre nœud parallèle à `build_sfxpost`, sortie identique
+à l'octet (83/83 fichiers en dictionnaire), **finalisations cumulées 165,9 → 165,9 s,
+mur 34,8/35,2 → 34,9/33,9 s** : rien de mesurable. Retiré. Ce qu'il faudrait regarder
+avant d'y revenir : l'exécuteur de DAG passe en séquence dans un handler d'acteur ou
+une attente coopérative (`luciole/src/runtime.rs`), et la finalisation tourne peut-être
+dans ce cas ; à vérifier avec un compteur avant de re-paralléliser quoi que ce soit.
+
+## 5 undecies. La paire mintée renommée (14 septembre)
+
+`<uuid>.<champ>.newtexts` / `.newsfx` → `.minted.termtexts` / `.minted.sfx` (décision de
+Lucie : « new » disait quand, pas quoi). Écrivain : nouveaux noms seuls. Lecteurs : les
+deux (`dictionary::pair_file_names`, `find_pair` ; l'ouverture du dictionnaire, le repli
+`fold_once`, la construction du `.minted.sfx` manquant au commit, l'effacement des
+paires consommées, `pair_files` de l'inventaire GC, la sync — bundle `<uuid>.<champ>.minted.`
+ou `.new` selon ce qui existe —, la tolérance du snapshot). Test
+`pending_pair_opens_under_both_names`. Une 4.2 ne sait pas replier les paires qu'une
+4.3 aurait laissées en attente après un crash ; une fermeture propre n'en laisse aucune.
+
 ## 6. Vérification
 
 - `cargo test --release --lib` : 1 471 verts (22 ignorés) ; sans features par

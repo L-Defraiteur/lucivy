@@ -76,11 +76,13 @@ impl<'a> DeltaExporter for LucivyDeltaExporter<'a> {
             for &g in &d.generations {
                 ids.insert(ld_lucivy::suffix_fst::dictionary::dictionary_bundle_id(g));
             }
-            // A pending pair travels as its own bundle too: `<uuid>.<field>.new`
-            // is a prefix of its two files and of nothing else of the segment.
+            // A pending pair travels as its own bundle too: `<uuid>.<field>.minted.`
+            // is a prefix of its two files and of nothing else of the segment
+            // (`<uuid>.<field>.new` for a pair written before 4.3).
             for u in &d.pending_segments {
                 for &f in &d.field_ids {
-                    ids.insert(format!("{u}.{f}.new"));
+                    let legacy = self.index_path.join(format!("{u}.{f}.newtexts")).exists();
+                    ids.insert(if legacy { format!("{u}.{f}.new") } else { format!("{u}.{f}.minted.") });
                 }
             }
         }
@@ -93,7 +95,9 @@ impl<'a> DeltaExporter for LucivyDeltaExporter<'a> {
 
     fn read_bundle_files(&self, bundle_id: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
         let (_, meta) = self.snapshot()?;
-        if bundle_id.ends_with(".new") && bundle_id.matches('.').count() == 2 {
+        let pair_bundle = (bundle_id.ends_with(".minted.") && bundle_id.matches('.').count() == 3)
+            || (bundle_id.ends_with(".new") && bundle_id.matches('.').count() == 2);
+        if pair_bundle {
             let mut files = Vec::new();
             for ext in ["sfx", "termtexts"] {
                 let rel = format!("{bundle_id}{ext}");

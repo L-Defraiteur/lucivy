@@ -1,6 +1,18 @@
 Unreleased — branch `v4.3`
 ==========================
 
+- **A segment's dictionary pair is named for what it is.** With the shared
+  dictionary, a segment writes next to itself the texts it minted first and
+  the suffix FST over them, for the commit's background fold to merge into
+  the next generation. They were `<uuid>.<field>.newtexts` and `.newsfx`
+  ("new" said when, not what); they are `<uuid>.<field>.minted.termtexts`
+  and `.minted.sfx` now. Every reader — the dictionary, the fold, the
+  inventory the garbage collector keeps, the snapshot, the sync — still
+  opens the old names, so an index written by 4.0 to 4.2 with pairs pending
+  (a writer that did not close cleanly) folds as before. The one thing 4.2
+  cannot do is fold the pairs a 4.3 writer left pending after a crash; a
+  cleanly closed index has none.
+
 - **The pending texts are probed before the FST parts.** A text minted since
   the last fold is in no part yet, and a lookup walked every part — up to 8
   generations and 64 pairs — before asking the pending table: 6.6 M such
