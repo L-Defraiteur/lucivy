@@ -480,7 +480,6 @@ pub fn merge_segments_v3(
                         is_word_start: meta.is_word_start,
                         // Only used while collecting (word-stripped grouping).
                         word_id: 0,
-                        content_overlap: None,
                         is_word_stripped: meta.is_word_stripped,
                     });
                     break new_ord;

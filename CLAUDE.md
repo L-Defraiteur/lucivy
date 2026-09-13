@@ -311,6 +311,7 @@ marches pour rien sautées, mur natif égal (les collecteurs ne sont pas le chem
   frontière, regex, deux caractères, phrase floue), prix des positions ; rapport `compare_engines.md`
 - Bench vs tantivy : `bench_vs_tantivy.rs`
 - IMPORTANT : toujours `> /tmp/fichier.txt 2>&1`, JAMAIS `| tail`
+- **Avant chaque commit de feature** (13 septembre au soir) : WASM rebâti et **panel de parité de 21 requêtes rejoué dans Chrome** sur 10 000 fichiers (dictionnaire puis sans positions), diffé contre les rapports de référence de `~/lucivy_bench/scratch-positions/parity_10k_{pos,nopos}_fix.json` — recette dans `docs/13-09-2026/10-knowledge-dump.md` § 6
 
 ## Build
 

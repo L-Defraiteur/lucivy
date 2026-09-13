@@ -23,7 +23,7 @@ Tout le workspace est en **4.2.0** ; `lucivy-fst` garde son numéro propre.
 | disposition | index | × texte | indexation 4.2 | ce qu'elle change |
 |---|---|---|---|---|
 | `sfx_version` 3 | 6 886 Mo | ×7,7 | 51 s | une FST de suffixes par segment |
-| dictionnaire partagé (défaut) | 5 064 Mo | ×5,6 | 47 s (**39,9 s** sur la branche `v4.3`, `07` § 5 sexies-septies) | une FST par shard, en générations |
+| dictionnaire partagé (défaut) | 5 064 Mo | ×5,6 | 47 s (**35 s** sur les branches empilées de `v4.3`, `07` § 5 sexies-octies) | une FST par shard, en générations |
 | + `derived_in_ram` | 3 408 Mo | ×3,8 | 46 s | les trois dérivés rebâtis à l'ouverture |
 | + `positions: false` (4.1) | **2 491 Mo** | **×2,8** | 47 s | documents + fréquences, chaque match vérifié sur le texte stocké |
 
@@ -81,6 +81,11 @@ document ─ tokenizer ─┬─ index inversé (postings, fréquences)
                             FST (builder v3) + sidecars ─ publié au commit
 ```
 
+- **Collecteur** (`collector_v3.rs`, `add_value`) : par valeur, les chunks du
+  tokenizer, un jeton étendu (chunk + recouvrement) interné par `(forme, texte)`, une
+  entrée de mot par ordinal mot-dépouillé (la première occurrence ; un mot suivi de
+  séparateurs différents est un seul ordinal), postings par ordinal ; tampons
+  réutilisés, rien d'alloué par occurrence depuis le 13 au soir (`07` § 5 octies).
 - **Fils** : `min(cœurs, 16)` natifs, un sur WASM. Tas d'écriture 25 Mo et budget SFX
   128 Mo **par fil** : la forme des segments ne dépend pas du nombre de fils (noyau :
   308 segments à 16 fils, 263 à 8, requêtes égales). Moins de segments = moins de

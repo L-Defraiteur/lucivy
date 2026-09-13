@@ -1,6 +1,19 @@
 Unreleased — branch `v4.3`
 ==========================
 
+- **The suffix collector allocates per token, not per occurrence.** Every
+  word of every value pushed a word entry with two `String`s (the FST builder
+  deduplicated them afterwards), grouped its chunks through a `BTreeMap` with a
+  `Vec` per word, and formatted a `String` per chunk; a per-ordinal
+  `content_overlap` was computed, cloned and never read. One entry per
+  word-stripped ordinal now, ranges instead of maps, reused buffers, the dead
+  field gone. Whole kernel 39 → 35 s, same segments, same ids, same query
+  results; single-threaded, 3 000 files 2.6 → 1.8 s. One visible change on
+  disk, for the better: a word followed by different separators is one
+  ordinal, and its FST record now carries the first occurrence's separator
+  length — the one `.termtexts` records — instead of whichever the builder
+  saw last.
+
 - **The commit no longer stops the world to forget its pending texts.** With
   the shard dictionary, the texts a writer minted since the last fold live in
   a pending table until a commit names their segments' pairs; forgetting them

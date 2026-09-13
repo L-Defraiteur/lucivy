@@ -118,9 +118,19 @@ reprennent ses chiffres à la main.
 (+ `&nopos`, `&commitmb=2` pour forcer des compactions, `&verbose`), `index linux` au
 prompt du terminal (Linux 2.6.0, 35 s, 1 089 Mo). Depuis la console :
 `window._playground.search(query, { limit, highlights, fields })` et
-`memoryStatus()` ; contrôle à l'octet des spans par `TextEncoder`. **Règle** : toute
-parallélisation ou changement du chemin d'indexation se vérifie sur 10 000 fichiers
-dans Chrome. Observé : la toute première recherche après une indexation à commits
+`memoryStatus()` ; contrôle à l'octet des spans par `TextEncoder`. **Règle (élargie le
+13 au soir, sur remarque de Lucie)** : toute parallélisation ou changement du chemin
+d'indexation se vérifie sur 10 000 fichiers dans Chrome, **et avant chaque commit de
+feature on rejoue le panel de parité de 21 requêtes** : WASM rebâti
+(`bash bindings/emscripten/build.sh`), page `?corpus=corpus-kernel-10k.tar.gz` (puis
+`&nopos`), dans la console `eval(await (await fetch('parity_run.js')).text())` puis
+`fetch('/log', {method:'POST', body:'MARQUEUR ' + JSON.stringify(window._parityResult) + '\n'})`,
+la ligne `MARQUEUR` de `playground/diag.log` → un json, et
+`python3 playground/parity_diff.py <référence> <nouveau>` contre les rapports de référence
+`~/lucivy_bench/scratch-positions/parity_10k_pos_fix.json` (dictionnaire, défaut) et
+`parity_10k_nopos_fix.json` (sans positions), écrits le 11 septembre après le correctif
+des doublons (comptes, top-10, scores à 1e-4, nombre de spans). Un écart hors ex æquo à la
+coupure est un défaut. Observé : la toute première recherche après une indexation à commits
 très rapprochés attend les fusions de fond (27 s puis 260 ms).
 
 ## 7. Publication
