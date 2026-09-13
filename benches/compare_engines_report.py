@@ -160,8 +160,9 @@ P("")
 # ── 2. the nine queries ──
 P("## 2. The nine verified queries")
 P("")
-P("| query | mode | truth (scan) | lucivy | spans | lucivy | Elasticsearch | tantivy |")
-P("|---|---|---|---|---|---|---|---|")
+nopos = lucivy.get("dict-nopos", ({}, {}))[0]
+P("| query | mode | truth (scan) | lucivy | spans | lucivy | lucivy, `positions: false` | Elasticsearch | tantivy |")
+P("|---|---|---|---|---|---|---|---|---|")
 NINE = [("mutex_lock:strict", "substring"), ("mutex_lock:relax", "separators relaxed"),
         ("spin_lock:strict", "substring"), ("sched:term", "whole word"), ("sched:strict", "substring"),
         ("printk:sw", "start of token"), ("schdule:fz1", "fuzzy, 1 edit"), ("regsiter:fz2", "fuzzy, 2 edits"),
@@ -179,12 +180,24 @@ for key, mode in NINE:
     lucol = f"**{n(r['docs'])}** {r['status']}" if r["status"] == "OK" else f"{n(r['docs'])} {r['status']}"
     truth_col = n(int(r['truth'])) if r['truth'].isdigit() else r['truth']
     spans_col = n(r['spans']) if r['spans'] else '—'
-    es_col = f"{mark(e['hits'], key)} · {e['took_ms']} ms" if e else '—'
+    # Elasticsearch, both of its numbers: the documents, then what it costs to
+    # know where — lucivy's column is documents *and* every span.
+    if e:
+        es_col = f"{mark(e['hits'], key)} · {e['took_ms']} ms"
+        if e.get("highlight_ms") is not None:
+            es_col += f" (+{e['highlight_ms']:.0f} ms with highlights on {n(e['highlight_docs'])})"
+    else:
+        es_col = '—'
+    np = nopos.get(key)
+    np_col = f"{np['search_ms']:.0f} ms" if np else '—'
     tv_ms = f"{t['ms']:.0f}" if t else ''
     tv_col = f"{mark(t['hits'], key)} · {tv_ms} ms" if t else '—'
-    P(f"| `{r['text']}` | {mode} | {truth_col} | {lucol} | {spans_col} | {r['search_ms']:.0f} ms | {es_col} | {tv_col} |")
+    P(f"| `{r['text']}` | {mode} | {truth_col} | {lucol} | {spans_col} | {r['search_ms']:.0f} ms | {np_col} | {es_col} | {tv_col} |")
 P("")
-P("lucivy's time is the search alone (documents and every span); Elasticsearch's is its own `took`, first run of each query; "
+P("lucivy's two times are the search alone, documents **and** every span: the shared dictionary, then the same index built "
+  "without positions (`positions: false`), which verifies each match on the stored text. Elasticsearch's first number is its "
+  "own `took` for the documents; the second, where it could be measured, is what `highlight` adds to mark the spans of the "
+  "top 200 — the only comparable figure, since a span is what lucivy returns with the answer. "
   "tantivy's is the count, or for substrings the whole verified path (see §3). Whole-word and prefix counts depend on each "
   "engine's definition of a word: lucivy's harness counts `sched` bounded by separators on both sides; the standard analyzer "
   "keeps `sched_clock` as one term and splits on `/`, so its whole-word and prefix rows are close but not equal. "

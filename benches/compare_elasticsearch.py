@@ -384,11 +384,24 @@ def main():
     rows = []
     for label, index, query, note in panel():
         hits, took, wall = count(index, query)
-        print(f"{label:<34} {index.replace('cmp_',''):<10} {hits:>7} {took:>6}ms {wall:>7.1f}ms")
+        # The same query again, asking for the spans: lucivy's time in the
+        # report is documents *and* every span, so the row must carry both of
+        # Elasticsearch's numbers or it compares two different questions.
+        field = "raw" if '"raw"' in json.dumps(query) else "body"
+        try:
+            hl = highlight_cost(index, query, field, HIGHLIGHT_LIMIT)
+        except SystemExit:
+            hl = None
+        hl_ms = round(hl["took_ms"] + hl["parse_ms"], 1) if hl else None
+        hl_note = f" (+{hl_ms} ms with highlights on the top {HIGHLIGHT_LIMIT})" if hl_ms is not None else ""
+        print(f"{label:<34} {index.replace('cmp_',''):<10} {hits:>7} {took:>6}ms {wall:>7.1f}ms{hl_note}")
         if note:
             print(f"{'':<34} {note}")
         rows.append({"query": label, "index": index, "hits": hits,
-                     "took_ms": took, "wall_ms": round(wall, 1), "truth": PANEL_TRUTH.get(label)})
+                     "took_ms": took, "wall_ms": round(wall, 1), "truth": PANEL_TRUTH.get(label),
+                     "highlight_ms": hl_ms,
+                     "highlight_spans": hl["spans"] if hl else None,
+                     "highlight_docs": hl["highlighted"] if hl else None})
 
     print(f"\n{'where the questions differ':<74} {'hits':>7} {'took':>8}")
     print("-" * 92)
