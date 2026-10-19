@@ -854,6 +854,12 @@ struct ShardActor {
     /// Les messages différés pendant un commit en vol, rejoués à sa fin dans
     /// leur ordre d'arrivée.
     deferred: std::collections::VecDeque<ShardMsg>,
+    /// **Les écritures que ce shard n'a pas pu appliquer** depuis le dernier
+    /// commit : pas d'écrivain (lâché par `LucivyHandle::close`), ou l'ajout
+    /// refusé par l'écrivain. Un `Insert` ou un `Delete` n'a pas de réponse :
+    /// c'est le `Commit` suivant qui le dit, en erreur, au lieu d'un `Ok` qui
+    /// laissait croire l'écriture faite (rag3db, 19 octobre 2026).
+    lost: Vec<String>,
 }
 
 impl ShardActor {
@@ -897,17 +903,32 @@ impl luciole::Actor for ShardActor {
                 reply.send(result);
             }
             ShardMsg::Insert { doc, pre_tokenized } => {
-                let mut guard = self.handle.writer.lock().unwrap();
-                if let Some(writer) = guard.as_mut() {
-                    let _ = if let Some(pt) = pre_tokenized {
-                        writer.add_document_pre_tokenized(doc, pt)
-                    } else {
-                        writer.add_document(doc)
-                    };
-                    self.handle.mark_uncommitted();
+                let handle = Arc::clone(&self.handle);
+                let mut guard = handle.writer.lock().unwrap();
+                match guard.as_mut() {
+                    Some(writer) => {
+                        let ajout = if let Some(pt) = pre_tokenized {
+                            writer.add_document_pre_tokenized(doc, pt)
+                        } else {
+                            writer.add_document(doc)
+                        };
+                        if let Err(e) = ajout {
+                            self.lost.push(format!("shard_{} : un document refusé par l'écrivain ({e})", self.shard_id));
+                        }
+                        handle.mark_uncommitted();
+                    }
+                    None => self.lost.push(format!("shard_{} : un document jeté, le shard n'a pas d'écrivain", self.shard_id)),
                 }
             }
             ShardMsg::Commit { fast, reply } => {
+                // Les écritures perdues depuis le dernier commit se disent ici,
+                // en erreur : un commit « réussi » les aurait cachées.
+                if !self.lost.is_empty() {
+                    let n = self.lost.len();
+                    let premieres: Vec<String> = self.lost.drain(..).take(3).collect();
+                    reply.send(Err(format!("{n} écriture(s) non appliquée(s) depuis le dernier commit — {}", premieres.join(" ; "))));
+                    return ActorStatus::Continue;
+                }
                 ctx.set_activity(format!("commit_drain shard_{}", self.shard_id));
                 // Step 1: Drain indexers — all pending DocsMsg processed first.
                 // FIFO guarantee: DrainMsg is behind all DocsMsg in the queue.
@@ -1029,10 +1050,14 @@ impl luciole::Actor for ShardActor {
                 self.finish_commit();
             }
             ShardMsg::Delete { term } => {
-                let mut guard = self.handle.writer.lock().unwrap();
-                if let Some(writer) = guard.as_mut() {
-                    writer.delete_term(term);
-                    self.handle.mark_uncommitted();
+                let handle = Arc::clone(&self.handle);
+                let mut guard = handle.writer.lock().unwrap();
+                match guard.as_mut() {
+                    Some(writer) => {
+                        writer.delete_term(term);
+                        handle.mark_uncommitted();
+                    }
+                    None => self.lost.push(format!("shard_{} : une suppression sautée, le shard n'a pas d'écrivain", self.shard_id)),
                 }
             }
             ShardMsg::Drain(d) => {
@@ -1057,6 +1082,7 @@ fn spawn_shard_pool(shards: &[Arc<LucivyHandle>]) -> luciole::Pool<ShardMsg> {
             self_ref: None, // set by on_start
             commit_in_flight: false,
             deferred: std::collections::VecDeque::new(),
+            lost: Vec::new(),
         }
     })
 }
@@ -3369,6 +3395,27 @@ mod tests {
             l.join().unwrap();
         }
         assert_eq!(handle.num_docs(), 50 * 31);
+    }
+
+    /// **Un shard sans écrivain ne perd plus les écritures en silence**
+    /// (rag3db, 19 octobre 2026) : un document envoyé à un shard dont
+    /// l'écrivain est lâché était jeté, et `add_document` puis `commit`
+    /// rendaient `Ok`. Le commit suivant le dit maintenant, en erreur.
+    #[test]
+    fn test_writes_to_a_shard_without_writer_are_reported_by_commit() {
+        let dir = tmp_dir("lucivy_shard_sans_ecrivain");
+        let handle = ShardedHandle::create(&dir, &make_config(1)).unwrap();
+        let body = handle.field("body").unwrap();
+        let nid = handle.field(NODE_ID_FIELD).unwrap();
+        handle.shard(0).unwrap().close().unwrap();
+        let mut doc = LucivyDocument::new();
+        doc.add_u64(nid, 1);
+        doc.add_text(body, "un document qui n'a plus d'écrivain");
+        handle.add_document(doc, 1).unwrap();
+        let e = handle.commit().unwrap_err();
+        assert!(e.contains("non appliquée") && e.contains("pas d'écrivain"), "{e}");
+        // Dit une fois : le commit suivant n'a plus rien à dire.
+        assert!(handle.commit().is_ok());
     }
 
     #[test]
