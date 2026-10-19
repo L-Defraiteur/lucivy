@@ -840,6 +840,32 @@ struct ShardActor {
     shard_id: usize,
     handle: Arc<LucivyHandle>,
     self_ref: Option<luciole::ActorRef<ShardMsg>>,
+    /// **Un commit est en vol** (de `Commit` à `CommitDone`). Sa tâche de
+    /// finalisation tient le verrou de l'écrivain pendant `prepared.commit()`,
+    /// qui attend de façon coopérative — et l'attente peut exécuter, sur le même
+    /// fil, un message ou une tâche de ce shard qui redemande ce verrou : le fil
+    /// s'attend lui-même, le shard se fige (sous des recherches qui envoient
+    /// leur `Commit` rapide pendant une réindexation ; vu par rag3db le 19
+    /// octobre 2026). Deux chemins y menaient : un `Insert`, un `Delete` ou un
+    /// `Commit` traité pendant la finalisation, et la finalisation d'un second
+    /// commit entrelacé. Un seul commit est donc en vol par shard, et les
+    /// écritures et commits suivants attendent son `CommitDone`.
+    commit_in_flight: bool,
+    /// Les messages différés pendant un commit en vol, rejoués à sa fin dans
+    /// leur ordre d'arrivée.
+    deferred: std::collections::VecDeque<ShardMsg>,
+}
+
+impl ShardActor {
+    /// Le commit en vol est fini (rendu, ou arrêté sur une erreur) : les
+    /// messages différés reprennent, dans leur ordre, derrière ceux en file.
+    fn finish_commit(&mut self) {
+        self.commit_in_flight = false;
+        let me = self.self_ref.as_ref().unwrap();
+        for m in self.deferred.drain(..) {
+            let _ = me.send(m);
+        }
+    }
 }
 
 impl luciole::Actor for ShardActor {
@@ -854,6 +880,14 @@ impl luciole::Actor for ShardActor {
     }
 
     fn handle(&mut self, msg: ShardMsg, ctx: &luciole::ActorContext) -> ActorStatus {
+        // Tout message qui prend le verrou de l'écrivain attend la fin de la
+        // finalisation en vol (voir `commit_in_flight`) au lieu de s'y bloquer.
+        if self.commit_in_flight
+            && matches!(msg, ShardMsg::Insert { .. } | ShardMsg::Delete { .. } | ShardMsg::Commit { .. })
+        {
+            self.deferred.push_back(msg);
+            return ActorStatus::Continue;
+        }
         match msg {
             ShardMsg::Search { weight, top_k, filter, reply } => {
                 ctx.set_activity(format!("search shard_{}", self.shard_id));
@@ -897,6 +931,7 @@ impl luciole::Actor for ShardActor {
                     }
                 };
 
+                self.commit_in_flight = true;
                 if drain_rxs.is_empty() {
                     let _ = self.self_ref.as_ref().unwrap().send(ShardMsg::IndexersDrained {
                         fast, reply,
@@ -915,19 +950,24 @@ impl luciole::Actor for ShardActor {
                 ctx.set_activity(format!("commit_flush shard_{}", self.shard_id));
                 // Step 2: All DocsMsg processed. Now flush indexers.
                 let flush_rxs = {
-                    let mut guard = self.handle.writer.lock().unwrap();
+                    // Le verrou sur un clone de l'Arc : `finish_commit` emprunte
+                    // l'acteur pendant que le verrou est tenu.
+                    let handle = Arc::clone(&self.handle);
+                    let mut guard = handle.writer.lock().unwrap();
                     match guard.as_mut() {
                         Some(writer) => {
                             match writer.flush_workers() {
                                 Ok(rxs) => rxs,
                                 Err(e) => {
                                     reply.send(Err(format!("flush shard_{}: {e}", self.shard_id)));
+                                    self.finish_commit();
                                     return ActorStatus::Continue;
                                 }
                             }
                         }
                         None => {
                             reply.send(Ok(()));
+                            self.finish_commit();
                             return ActorStatus::Continue;
                         }
                     }
@@ -985,6 +1025,8 @@ impl luciole::Actor for ShardActor {
                 ctx.set_activity(format!("commit_done shard_{}", self.shard_id));
                 // Step 4: Forward result to the original caller.
                 reply.send(result);
+                // La finalisation a rendu le verrou.
+                self.finish_commit();
             }
             ShardMsg::Delete { term } => {
                 let mut guard = self.handle.writer.lock().unwrap();
@@ -1013,6 +1055,8 @@ fn spawn_shard_pool(shards: &[Arc<LucivyHandle>]) -> luciole::Pool<ShardMsg> {
             shard_id: i,
             handle: shards_clone[i].clone(),
             self_ref: None, // set by on_start
+            commit_in_flight: false,
+            deferred: std::collections::VecDeque::new(),
         }
     })
 }
@@ -3264,6 +3308,67 @@ mod tests {
         let results = handle.search(&query, 5, None).unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].shard_id, 0);
+    }
+
+    /// **Un commit sous lectures ne se fige pas** (rag3db, 19 octobre 2026).
+    /// La tâche de finalisation d'un commit (`ShardMsg::FlushDone`) tient le
+    /// verrou de l'écrivain pendant `prepared.commit()`, qui attend de façon
+    /// coopérative : l'attente peut exécuter, sur le même fil, un message du
+    /// même acteur — le `Commit` rapide qu'une recherche envoie pour voir les
+    /// écritures en cours —, qui redemande ce verrou : le fil s'attend
+    /// lui-même, l'acteur reste BUSY, les recherches et les commits attendent
+    /// sans fin. Quatre lecteurs en boucle pendant des commits répétés ; un
+    /// commit qui ne rend pas en 60 s est un figement.
+    #[test]
+    fn test_commit_under_concurrent_searches_does_not_freeze() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tmp_dir("lucivy_commit_sous_lectures");
+        let handle = Arc::new(ShardedHandle::create(&dir, &make_config(4)).unwrap());
+        let body = handle.field("body").unwrap();
+        let nid = handle.field(NODE_ID_FIELD).unwrap();
+        let ajouter = |h: &ShardedHandle, debut: u64| {
+            for i in debut..debut + 50 {
+                let mut doc = LucivyDocument::new();
+                doc.add_u64(nid, i);
+                doc.add_text(body, &format!("document {i} about rust and lucivy"));
+                h.add_document(doc, i).unwrap();
+            }
+        };
+        ajouter(&handle, 0);
+        handle.commit().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let lecteurs: Vec<_> = (0..4)
+            .map(|_| {
+                let (h, s) = (handle.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    let q: QueryConfig =
+                        serde_json::from_str(r#"{"type": "contains", "field": "body", "value": "rust"}"#).unwrap();
+                    while !s.load(Ordering::SeqCst) {
+                        let _ = h.search(&q, 5, None);
+                    }
+                })
+            })
+            .collect();
+        for tour in 1u64..=30 {
+            ajouter(&handle, tour * 1000);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let h = handle.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(h.commit());
+            });
+            match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+                Ok(r) => r.unwrap(),
+                Err(_) => {
+                    stop.store(true, Ordering::SeqCst);
+                    panic!("le commit du tour {tour} est figé depuis 60 s, quatre lecteurs en boucle");
+                }
+            }
+        }
+        stop.store(true, Ordering::SeqCst);
+        for l in lecteurs {
+            l.join().unwrap();
+        }
+        assert_eq!(handle.num_docs(), 50 * 31);
     }
 
     #[test]
