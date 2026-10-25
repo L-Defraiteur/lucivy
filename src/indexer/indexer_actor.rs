@@ -258,11 +258,14 @@ impl<D: Document> IndexerState<D> {
 
         let batch_len = batch.len();
         // These documents are no longer queued (see `wait_docs_capacity`).
-        DOCS_IN_FLIGHT.fetch_update(
+        // `fetch_update` is deprecated for `try_update` since Rust 1.99, which
+        // `rust-version` 1.85 does not have: kept, the lint allowed here.
+        #[allow(deprecated)]
+        let _ = DOCS_IN_FLIGHT.fetch_update(
             std::sync::atomic::Ordering::AcqRel,
             std::sync::atomic::Ordering::Acquire,
             |n| Some(n.saturating_sub(batch_len)),
-        ).ok();
+        );
         self.set_activity(format!("poll_finalize batch={batch_len}"));
 
         // Poll previous background finalize (non-blocking).
