@@ -1,8 +1,17 @@
-# lucivy-wasm 4.3.0
+# lucivy-wasm 4.3.1
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. In the browser — the same engine as the native bindings, built with emscripten: **threads** (pthreads over SharedArrayBuffer), OPFS persistence, snapshot import. Runs in a Web Worker. MIT.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — it clones lucivy's own source from GitHub and indexes it in your browser.
+
+### What's new in 4.3.1
+
+A patch release that fixes concurrency between searches and writes. The index format is unchanged.
+
+- **Searches during commits no longer lose writes.** A BM25 statistic read across two states of the index made a search panic. The panic took down the shard serving it, and documents disappeared behind commits that returned `Ok`, or later commits froze. The statistic is now bounded, and a search that panics answers an error instead of killing the shard.
+- **One commit in flight per shard.** Writes, commits and drains that arrive meanwhile wait, and run when it ends, in their order.
+- **Closing commits, always.** Dropping an index without `close()` now commits what was still queued. Writes to a shard without a writer are reported by the next commit instead of being dropped silently.
+- The browser playground starts its engine only on a cross-origin isolated page. A hard reload no longer leaves it dead.
 
 ### What's new in 4.3
 

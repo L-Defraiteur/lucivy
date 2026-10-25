@@ -1,5 +1,5 @@
-Lucivy 4.3.1 — unreleased
-=========================
+Lucivy 4.3.1 — 25 October 2026
+===============================
 
 - **Fixed: a commit could freeze under concurrent searches.** A shard's
   commit finalizes on a task that holds the writer lock while it waits

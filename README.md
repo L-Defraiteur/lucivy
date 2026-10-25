@@ -1,4 +1,4 @@
-# lucivy 4.3.0
+# lucivy 4.3.1
 
 [![PyPI](https://img.shields.io/pypi/v/lucivy?label=PyPI&color=blue)](https://pypi.org/project/lucivy/)
 [![npm](https://img.shields.io/npm/v/lucivy?label=npm&color=cb3837)](https://www.npmjs.com/package/lucivy)
@@ -30,6 +30,15 @@ lucivy's own source from GitHub and indexes it in your browser in a few seconds.
 tab. The second half is typed by hand — `index postgres`, then `--strict
 "heap_insert"`, `"CREATE INDEX CONCURRENTLY"` (27 hits, 11 ms), `--fuzzy 1
 "vaccum"` (17 ms) and `--regex "ExecInit[A-Z][a-zA-Z]+\("` (20 ms).*
+
+### What's new in 4.3.1
+
+A patch release that fixes concurrency between searches and writes. The index format is unchanged.
+
+- **Searches during commits no longer lose writes.** A BM25 statistic read across two states of the index made a search panic. The panic took down the shard serving it, and documents disappeared behind commits that returned `Ok`, or later commits froze. The statistic is now bounded, and a search that panics answers an error instead of killing the shard.
+- **One commit in flight per shard.** Writes, commits and drains that arrive meanwhile wait, and run when it ends, in their order.
+- **Closing commits, always.** Dropping an index without `close()` now commits what was still queued. Writes to a shard without a writer are reported by the next commit instead of being dropped silently.
+- The browser playground starts its engine only on a cross-origin isolated page. A hard reload no longer leaves it dead.
 
 ### What's new in 4.3
 
@@ -145,7 +154,7 @@ tab. The second half is typed by hand — `index postgres`, then `--strict
   3.0.x does not open a 4.0 index; the first commit in 4.0 converts without
   return.
 - One version number for the whole workspace: `ld-lucivy`, `lucivy-core`,
-  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.3.0.
+  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.3.1.
 
 3.0.x brought SFX v3 (exact byte spans on every query mode), boolean syntax,
 Jaro-Winkler, query warnings, bring-your-own-storage in every binding, snapshots
