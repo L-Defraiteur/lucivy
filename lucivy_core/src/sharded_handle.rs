@@ -3435,8 +3435,10 @@ mod tests {
     /// an `Insert` of the new one; if the `Delete` is deferred during a commit
     /// in flight and replayed behind an `Insert` that arrived after the
     /// commit's end, it removes the new version too and the document is gone.
-    /// Readers keep fast commits in flight while one document is updated over
-    /// and over: it must exist exactly once at the end.
+    /// Two threads keep fast commits in flight and four readers keep the
+    /// shard actor busy with searches (so its mailbox fills up behind each
+    /// `CommitDone`) while one document is updated over and over: it must
+    /// exist exactly once at the end.
     #[test]
     fn test_updates_during_commits_keep_their_order() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -3450,35 +3452,48 @@ mod tests {
             doc.add_text(body, &format!("document seven about rust, version {v}"));
             doc
         };
+        for i in 1000..3000u64 {
+            let mut doc = LucivyDocument::new();
+            doc.add_u64(nid, i);
+            doc.add_text(body, &format!("filler {i} about rust and lucivy"));
+            handle.add_document(doc, i).unwrap();
+        }
         handle.add_document(version(0), 7).unwrap();
         handle.commit().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
-        let readers: Vec<_> = (0..4)
+        let mut committers: Vec<_> = (0..2)
             .map(|_| {
                 let (h, s) = (handle.clone(), stop.clone());
                 std::thread::spawn(move || {
-                    let q: QueryConfig =
-                        serde_json::from_str(r#"{"type": "contains", "field": "body", "value": "rust"}"#).unwrap();
                     while !s.load(Ordering::SeqCst) {
-                        let _ = h.search(&q, 5, None);
+                        h.commit_fast().unwrap();
                     }
                 })
             })
             .collect();
-        for v in 1u64..=500 {
+        committers.extend((0..4).map(|_| {
+            let (h, s) = (handle.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let q: QueryConfig =
+                    serde_json::from_str(r#"{"type": "contains", "field": "body", "value": "rust"}"#).unwrap();
+                while !s.load(Ordering::SeqCst) {
+                    let _ = h.search(&q, 5, None);
+                }
+            })
+        }));
+        for v in 1u64..=3000 {
             handle.delete_by_node_id(7).unwrap();
+            // A gap between the two halves of the update, varied, so that a
+            // commit can end inside it while the actor is busy searching.
+            std::thread::sleep(std::time::Duration::from_micros(v % 400));
             handle.add_document(version(v), 7).unwrap();
-            if v % 50 == 0 {
-                handle.commit().unwrap();
-                assert_eq!(handle.num_docs(), 1, "after the commit of version {v}");
-            }
         }
         stop.store(true, Ordering::SeqCst);
-        for r in readers {
-            r.join().unwrap();
+        for c in committers {
+            c.join().unwrap();
         }
         handle.commit().unwrap();
-        assert_eq!(handle.num_docs(), 1);
+        assert_eq!(handle.num_docs(), 2001, "document 7 must be there once, next to the 2 000 fillers");
     }
 
     /// **A shard without a writer no longer drops writes silently** (rag3db,
