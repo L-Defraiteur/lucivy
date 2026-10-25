@@ -3314,8 +3314,18 @@ impl ShardedHandle {
 
 impl Drop for ShardedHandle {
     fn drop(&mut self) {
-        // Release writer locks on all shards so other processes can open the index.
-        // Best-effort: errors are silently ignored during drop.
+        // Dropping the handle closes it, and closing commits: the writes
+        // still queued to the shard actors go through the same commit as
+        // `close()`. Closing the shards directly, as this did before 4.3.1,
+        // committed what the actors had already applied and dropped what was
+        // still in their mailbox — whether a document added just before the
+        // drop survived depended on timing.
+        if !self.closed.load(Ordering::Acquire) {
+            let _ = self.close();
+        }
+        // Release writer locks on all shards so other processes can open the
+        // index, even when `close()` stopped on an error. Best-effort: errors
+        // are silently ignored during drop.
         for shard in &self.shards {
             let _ = shard.close();
         }
@@ -3494,6 +3504,35 @@ mod tests {
         }
         handle.commit().unwrap();
         assert_eq!(handle.num_docs(), 2001, "document 7 must be there once, next to the 2 000 fillers");
+    }
+
+    /// **Dropping the handle commits what was queued** (4.3.1). The drop
+    /// closed the shards directly: a document whose `Insert` the shard actor
+    /// had already applied was committed, one still in its mailbox was lost,
+    /// depending on timing. It goes through `close()` now. Twenty rounds, each
+    /// adding 500 documents right before the drop, on four shards.
+    #[test]
+    fn test_drop_commits_the_writes_still_queued() {
+        let dir = tmp_dir("lucivy_drop_commits_queued");
+        for round in 0..20u64 {
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let handle = ShardedHandle::create(&dir, &make_config(4)).unwrap();
+            let body = handle.field("body").unwrap();
+            let nid = handle.field(NODE_ID_FIELD).unwrap();
+            for i in 0..501u64 {
+                let mut doc = LucivyDocument::new();
+                doc.add_u64(nid, i);
+                doc.add_text(body, &format!("document {i} of round {round}"));
+                handle.add_document(doc, i).unwrap();
+                if i == 0 {
+                    handle.commit().unwrap();
+                }
+            }
+            drop(handle);
+            let reopened = ShardedHandle::open(&dir).unwrap();
+            assert_eq!(reopened.num_docs(), 501, "round {round}: the documents added before the drop");
+        }
     }
 
     /// **A shard without a writer no longer drops writes silently** (rag3db,
