@@ -20,6 +20,15 @@ Lucivy 4.3.1 — unreleased
   apply, and the next commit still makes the writes that did apply durable,
   then returns an error with the count and the first three.
 
+- **Fixed: dropping an index lost the writes still queued.** Closing commits
+  — `close()` always did, and the bindings say so — but dropping the handle
+  without `close()` closed the shards directly: what the shard actors had
+  already applied was committed, what was still in their mailbox was lost.
+  With 500 documents added right before the drop, 377 to 381 of 501 came
+  back on reopen. The drop now goes through `close()`, queued writes
+  included. The Python test that expected a dropped index to lose its
+  uncommitted document (it passed by timing) now expects it to keep it.
+
 - **The playground starts its engine only on a cross-origin isolated page.**
   GitHub Pages sends no COOP/COEP headers; the page's service worker adds
   them, but only to a page it controls, and after a hard reload it did not
