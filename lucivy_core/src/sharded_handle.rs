@@ -840,36 +840,43 @@ struct ShardActor {
     shard_id: usize,
     handle: Arc<LucivyHandle>,
     self_ref: Option<luciole::ActorRef<ShardMsg>>,
-    /// **Un commit est en vol** (de `Commit` à `CommitDone`). Sa tâche de
-    /// finalisation tient le verrou de l'écrivain pendant `prepared.commit()`,
-    /// qui attend de façon coopérative — et l'attente peut exécuter, sur le même
-    /// fil, un message ou une tâche de ce shard qui redemande ce verrou : le fil
-    /// s'attend lui-même, le shard se fige (sous des recherches qui envoient
-    /// leur `Commit` rapide pendant une réindexation ; vu par rag3db le 19
-    /// octobre 2026). Deux chemins y menaient : un `Insert`, un `Delete` ou un
-    /// `Commit` traité pendant la finalisation, et la finalisation d'un second
-    /// commit entrelacé. Un seul commit est donc en vol par shard, et les
-    /// écritures et commits suivants attendent son `CommitDone`.
+    /// **A commit is in flight** (from `Commit` to `CommitDone`). Its
+    /// finalization task holds the writer lock during `prepared.commit()`,
+    /// which waits cooperatively — and the wait may run, on the same thread, a
+    /// message or task of this shard that asks for that lock again: the thread
+    /// waits on itself and the shard freezes (under searches that send their
+    /// fast `Commit` during a reindex; seen by rag3db on 19 October 2026). Two
+    /// paths led there: an `Insert`, `Delete` or `Commit` handled during the
+    /// finalization, and the finalization of a second, interleaved commit. So
+    /// one commit at most is in flight per shard, and the writes and commits
+    /// that follow wait for its `CommitDone`.
     commit_in_flight: bool,
-    /// Les messages différés pendant un commit en vol, rejoués à sa fin dans
-    /// leur ordre d'arrivée.
+    /// Messages deferred while a commit is in flight, replayed when it ends,
+    /// in arrival order and ahead of anything that arrives after.
     deferred: std::collections::VecDeque<ShardMsg>,
-    /// **Les écritures que ce shard n'a pas pu appliquer** depuis le dernier
-    /// commit : pas d'écrivain (lâché par `LucivyHandle::close`), ou l'ajout
-    /// refusé par l'écrivain. Un `Insert` ou un `Delete` n'a pas de réponse :
-    /// c'est le `Commit` suivant qui le dit, en erreur, au lieu d'un `Ok` qui
-    /// laissait croire l'écriture faite (rag3db, 19 octobre 2026).
+    /// **Writes this shard could not apply** since the last commit: no writer
+    /// (dropped by `LucivyHandle::close`), or the document refused by the
+    /// writer. An `Insert` or a `Delete` has no reply, so the next `Commit`
+    /// reports them as an error instead of an `Ok` that let the caller believe
+    /// the write was done (rag3db, 19 October 2026).
     lost: Vec<String>,
 }
 
 impl ShardActor {
-    /// Le commit en vol est fini (rendu, ou arrêté sur une erreur) : les
-    /// messages différés reprennent, dans leur ordre, derrière ceux en file.
-    fn finish_commit(&mut self) {
+    /// The commit in flight is over (returned, or stopped on an error): the
+    /// deferred messages are handled now, in their order, before any message
+    /// still in the mailbox — sending them back to the mailbox would put them
+    /// behind it, and an `Insert` of the new version of a document could then
+    /// run before the deferred `Delete` of the old one, which would remove it.
+    /// A deferred `Commit` starts a new commit in flight: what follows it stays
+    /// deferred, still ahead of later arrivals.
+    fn finish_commit(&mut self, ctx: &luciole::ActorContext) {
         self.commit_in_flight = false;
-        let me = self.self_ref.as_ref().unwrap();
-        for m in self.deferred.drain(..) {
-            let _ = me.send(m);
+        while !self.commit_in_flight {
+            let Some(m) = self.deferred.pop_front() else { break };
+            if let ActorStatus::Stop = luciole::Actor::handle(self, m, ctx) {
+                break;
+            }
         }
     }
 }
@@ -886,8 +893,8 @@ impl luciole::Actor for ShardActor {
     }
 
     fn handle(&mut self, msg: ShardMsg, ctx: &luciole::ActorContext) -> ActorStatus {
-        // Tout message qui prend le verrou de l'écrivain attend la fin de la
-        // finalisation en vol (voir `commit_in_flight`) au lieu de s'y bloquer.
+        // Every message that takes the writer lock waits for the end of the
+        // commit in flight (see `commit_in_flight`) instead of blocking on it.
         if self.commit_in_flight
             && matches!(msg, ShardMsg::Insert { .. } | ShardMsg::Delete { .. } | ShardMsg::Commit { .. })
         {
@@ -907,26 +914,26 @@ impl luciole::Actor for ShardActor {
                 let mut guard = handle.writer.lock().unwrap();
                 match guard.as_mut() {
                     Some(writer) => {
-                        let ajout = if let Some(pt) = pre_tokenized {
+                        let added = if let Some(pt) = pre_tokenized {
                             writer.add_document_pre_tokenized(doc, pt)
                         } else {
                             writer.add_document(doc)
                         };
-                        if let Err(e) = ajout {
-                            self.lost.push(format!("shard_{} : un document refusé par l'écrivain ({e})", self.shard_id));
+                        if let Err(e) = added {
+                            self.lost.push(format!("shard_{}: a document refused by the writer ({e})", self.shard_id));
                         }
                         handle.mark_uncommitted();
                     }
-                    None => self.lost.push(format!("shard_{} : un document jeté, le shard n'a pas d'écrivain", self.shard_id)),
+                    None => self.lost.push(format!("shard_{}: a document dropped, the shard has no writer", self.shard_id)),
                 }
             }
             ShardMsg::Commit { fast, reply } => {
-                // Les écritures perdues depuis le dernier commit se disent ici,
-                // en erreur : un commit « réussi » les aurait cachées.
+                // Writes lost since the last commit are reported here, as an
+                // error: a "successful" commit would have hidden them.
                 if !self.lost.is_empty() {
                     let n = self.lost.len();
-                    let premieres: Vec<String> = self.lost.drain(..).take(3).collect();
-                    reply.send(Err(format!("{n} écriture(s) non appliquée(s) depuis le dernier commit — {}", premieres.join(" ; "))));
+                    let first: Vec<String> = self.lost.drain(..).take(3).collect();
+                    reply.send(Err(format!("{n} write(s) not applied since the last commit: {}", first.join("; "))));
                     return ActorStatus::Continue;
                 }
                 ctx.set_activity(format!("commit_drain shard_{}", self.shard_id));
@@ -970,27 +977,30 @@ impl luciole::Actor for ShardActor {
             ShardMsg::IndexersDrained { fast, reply } => {
                 ctx.set_activity(format!("commit_flush shard_{}", self.shard_id));
                 // Step 2: All DocsMsg processed. Now flush indexers.
-                let flush_rxs = {
-                    // Le verrou sur un clone de l'Arc : `finish_commit` emprunte
-                    // l'acteur pendant que le verrou est tenu.
-                    let handle = Arc::clone(&self.handle);
-                    let mut guard = handle.writer.lock().unwrap();
+                // The guard is dropped at the end of this block, before
+                // `finish_commit`: the deferred writes it replays take the
+                // writer lock again.
+                let flushed = {
+                    let mut guard = self.handle.writer.lock().unwrap();
                     match guard.as_mut() {
-                        Some(writer) => {
-                            match writer.flush_workers() {
-                                Ok(rxs) => rxs,
-                                Err(e) => {
-                                    reply.send(Err(format!("flush shard_{}: {e}", self.shard_id)));
-                                    self.finish_commit();
-                                    return ActorStatus::Continue;
-                                }
-                            }
-                        }
-                        None => {
-                            reply.send(Ok(()));
-                            self.finish_commit();
-                            return ActorStatus::Continue;
-                        }
+                        Some(writer) => writer
+                            .flush_workers()
+                            .map(Some)
+                            .map_err(|e| format!("flush shard_{}: {e}", self.shard_id)),
+                        None => Ok(None),
+                    }
+                };
+                let flush_rxs = match flushed {
+                    Ok(Some(rxs)) => rxs,
+                    Ok(None) => {
+                        reply.send(Ok(()));
+                        self.finish_commit(ctx);
+                        return ActorStatus::Continue;
+                    }
+                    Err(e) => {
+                        reply.send(Err(e));
+                        self.finish_commit(ctx);
+                        return ActorStatus::Continue;
                     }
                 };
 
@@ -1046,8 +1056,8 @@ impl luciole::Actor for ShardActor {
                 ctx.set_activity(format!("commit_done shard_{}", self.shard_id));
                 // Step 4: Forward result to the original caller.
                 reply.send(result);
-                // La finalisation a rendu le verrou.
-                self.finish_commit();
+                // The finalization has released the lock.
+                self.finish_commit(ctx);
             }
             ShardMsg::Delete { term } => {
                 let handle = Arc::clone(&self.handle);
@@ -1057,7 +1067,7 @@ impl luciole::Actor for ShardActor {
                         writer.delete_term(term);
                         handle.mark_uncommitted();
                     }
-                    None => self.lost.push(format!("shard_{} : une suppression sautée, le shard n'a pas d'écrivain", self.shard_id)),
+                    None => self.lost.push(format!("shard_{}: a delete skipped, the shard has no writer", self.shard_id)),
                 }
             }
             ShardMsg::Drain(d) => {
@@ -3336,34 +3346,33 @@ mod tests {
         assert_eq!(results[0].shard_id, 0);
     }
 
-    /// **Un commit sous lectures ne se fige pas** (rag3db, 19 octobre 2026).
-    /// La tâche de finalisation d'un commit (`ShardMsg::FlushDone`) tient le
-    /// verrou de l'écrivain pendant `prepared.commit()`, qui attend de façon
-    /// coopérative : l'attente peut exécuter, sur le même fil, un message du
-    /// même acteur — le `Commit` rapide qu'une recherche envoie pour voir les
-    /// écritures en cours —, qui redemande ce verrou : le fil s'attend
-    /// lui-même, l'acteur reste BUSY, les recherches et les commits attendent
-    /// sans fin. Quatre lecteurs en boucle pendant des commits répétés ; un
-    /// commit qui ne rend pas en 60 s est un figement.
+    /// **A commit under searches does not freeze** (rag3db, 19 October 2026).
+    /// The finalization task of a commit (`ShardMsg::FlushDone`) holds the
+    /// writer lock during `prepared.commit()`, which waits cooperatively: the
+    /// wait may run, on the same thread, a message of the same actor — the
+    /// fast `Commit` a search sends to see pending writes — that asks for that
+    /// lock again: the thread waits on itself, the actor stays BUSY, searches
+    /// and commits wait forever. Four readers loop during repeated commits; a
+    /// commit that does not return within 60 s is a freeze.
     #[test]
     fn test_commit_under_concurrent_searches_does_not_freeze() {
         use std::sync::atomic::{AtomicBool, Ordering};
-        let dir = tmp_dir("lucivy_commit_sous_lectures");
+        let dir = tmp_dir("lucivy_commit_under_searches");
         let handle = Arc::new(ShardedHandle::create(&dir, &make_config(4)).unwrap());
         let body = handle.field("body").unwrap();
         let nid = handle.field(NODE_ID_FIELD).unwrap();
-        let ajouter = |h: &ShardedHandle, debut: u64| {
-            for i in debut..debut + 50 {
+        let add_batch = |h: &ShardedHandle, start: u64| {
+            for i in start..start + 50 {
                 let mut doc = LucivyDocument::new();
                 doc.add_u64(nid, i);
                 doc.add_text(body, &format!("document {i} about rust and lucivy"));
                 h.add_document(doc, i).unwrap();
             }
         };
-        ajouter(&handle, 0);
+        add_batch(&handle, 0);
         handle.commit().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
-        let lecteurs: Vec<_> = (0..4)
+        let readers: Vec<_> = (0..4)
             .map(|_| {
                 let (h, s) = (handle.clone(), stop.clone());
                 std::thread::spawn(move || {
@@ -3375,8 +3384,8 @@ mod tests {
                 })
             })
             .collect();
-        for tour in 1u64..=30 {
-            ajouter(&handle, tour * 1000);
+        for round in 1u64..=30 {
+            add_batch(&handle, round * 1000);
             let (tx, rx) = std::sync::mpsc::channel();
             let h = handle.clone();
             std::thread::spawn(move || {
@@ -3386,35 +3395,86 @@ mod tests {
                 Ok(r) => r.unwrap(),
                 Err(_) => {
                     stop.store(true, Ordering::SeqCst);
-                    panic!("le commit du tour {tour} est figé depuis 60 s, quatre lecteurs en boucle");
+                    panic!("the commit of round {round} has been frozen for 60 s, four readers looping");
                 }
             }
         }
         stop.store(true, Ordering::SeqCst);
-        for l in lecteurs {
-            l.join().unwrap();
+        for r in readers {
+            r.join().unwrap();
         }
         assert_eq!(handle.num_docs(), 50 * 31);
     }
 
-    /// **Un shard sans écrivain ne perd plus les écritures en silence**
-    /// (rag3db, 19 octobre 2026) : un document envoyé à un shard dont
-    /// l'écrivain est lâché était jeté, et `add_document` puis `commit`
-    /// rendaient `Ok`. Le commit suivant le dit maintenant, en erreur.
+    /// **Writes deferred during a commit keep their order** against writes
+    /// that arrive after it. An update is a `Delete` of the old version then
+    /// an `Insert` of the new one; if the `Delete` is deferred during a commit
+    /// in flight and replayed behind an `Insert` that arrived after the
+    /// commit's end, it removes the new version too and the document is gone.
+    /// Readers keep fast commits in flight while one document is updated over
+    /// and over: it must exist exactly once at the end.
+    #[test]
+    fn test_updates_during_commits_keep_their_order() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tmp_dir("lucivy_updates_during_commits");
+        let handle = Arc::new(ShardedHandle::create(&dir, &make_config(1)).unwrap());
+        let body = handle.field("body").unwrap();
+        let nid = handle.field(NODE_ID_FIELD).unwrap();
+        let version = |v: u64| {
+            let mut doc = LucivyDocument::new();
+            doc.add_u64(nid, 7);
+            doc.add_text(body, &format!("document seven about rust, version {v}"));
+            doc
+        };
+        handle.add_document(version(0), 7).unwrap();
+        handle.commit().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let (h, s) = (handle.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    let q: QueryConfig =
+                        serde_json::from_str(r#"{"type": "contains", "field": "body", "value": "rust"}"#).unwrap();
+                    while !s.load(Ordering::SeqCst) {
+                        let _ = h.search(&q, 5, None);
+                    }
+                })
+            })
+            .collect();
+        for v in 1u64..=500 {
+            handle.delete_by_node_id(7).unwrap();
+            handle.add_document(version(v), 7).unwrap();
+            if v % 50 == 0 {
+                handle.commit().unwrap();
+                assert_eq!(handle.num_docs(), 1, "after the commit of version {v}");
+            }
+        }
+        stop.store(true, Ordering::SeqCst);
+        for r in readers {
+            r.join().unwrap();
+        }
+        handle.commit().unwrap();
+        assert_eq!(handle.num_docs(), 1);
+    }
+
+    /// **A shard without a writer no longer drops writes silently** (rag3db,
+    /// 19 October 2026): a document sent to a shard whose writer was dropped
+    /// was thrown away, and `add_document` then `commit` returned `Ok`. The
+    /// next commit now reports it, as an error.
     #[test]
     fn test_writes_to_a_shard_without_writer_are_reported_by_commit() {
-        let dir = tmp_dir("lucivy_shard_sans_ecrivain");
+        let dir = tmp_dir("lucivy_shard_without_writer");
         let handle = ShardedHandle::create(&dir, &make_config(1)).unwrap();
         let body = handle.field("body").unwrap();
         let nid = handle.field(NODE_ID_FIELD).unwrap();
         handle.shard(0).unwrap().close().unwrap();
         let mut doc = LucivyDocument::new();
         doc.add_u64(nid, 1);
-        doc.add_text(body, "un document qui n'a plus d'écrivain");
+        doc.add_text(body, "a document whose shard has no writer any more");
         handle.add_document(doc, 1).unwrap();
         let e = handle.commit().unwrap_err();
-        assert!(e.contains("non appliquée") && e.contains("pas d'écrivain"), "{e}");
-        // Dit une fois : le commit suivant n'a plus rien à dire.
+        assert!(e.contains("not applied") && e.contains("no writer"), "{e}");
+        // Reported once: the next commit has nothing left to say.
         assert!(handle.commit().is_ok());
     }
 
