@@ -51,7 +51,13 @@ impl Bm25StatisticsProvider for Searcher {
 }
 
 pub(crate) fn idf(doc_freq: u64, doc_count: u64) -> Score {
-    assert!(doc_count >= doc_freq, "{doc_count} >= {doc_freq}");
+    // Statistics gathered across shards while commits run can come from two
+    // states of the index: a term seen in more documents than the count read
+    // a moment earlier. That asserted, and the panic took down whichever
+    // shard actor ran the search — its mailbox and deferred writes with it
+    // (documents lost behind commits that answered `Ok`, commits frozen).
+    // Bounded instead: the term counts as present in every document.
+    let doc_freq = doc_freq.min(doc_count);
     let x = ((doc_count - doc_freq) as Score + 0.5) / (doc_freq as Score + 0.5);
     (1.0 + x).ln()
 }
@@ -237,5 +243,14 @@ mod tests {
     fn test_idf() {
         let score: Score = 2.0;
         assert_nearly_equals!(idf(1, 2), score.ln());
+    }
+
+    /// Statistics from two states of the index (a term in 788 documents, a
+    /// count of 775 read a moment earlier, seen under concurrent commits) do
+    /// not panic: the term counts as present in every document.
+    #[test]
+    fn test_idf_doc_freq_above_doc_count() {
+        assert_nearly_equals!(idf(788, 775), idf(775, 775));
+        assert!(idf(788, 775).is_finite());
     }
 }
