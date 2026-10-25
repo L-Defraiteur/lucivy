@@ -860,9 +860,33 @@ struct ShardActor {
     /// reports them as an error instead of an `Ok` that let the caller believe
     /// the write was done (rag3db, 19 October 2026).
     lost: Vec<String>,
+    /// The report of `lost` taken by the commit in flight: that commit still
+    /// makes the writes that did apply durable, then answers with this error.
+    lost_report: Option<String>,
 }
 
 impl ShardActor {
+    /// Takes the lost writes as one message (the count and the first three).
+    fn take_lost_report(&mut self) -> Option<String> {
+        if self.lost.is_empty() {
+            return None;
+        }
+        let n = self.lost.len();
+        let first: Vec<String> = self.lost.drain(..).take(3).collect();
+        Some(format!("{n} write(s) not applied since the last commit: {}", first.join("; ")))
+    }
+
+    /// The answer of a commit: its own result, turned into an error when
+    /// writes were lost before it — after the commit, so the writes that did
+    /// apply are durable either way.
+    fn commit_result(result: Result<(), String>, lost: Option<String>) -> Result<(), String> {
+        match (result, lost) {
+            (r, None) => r,
+            (Ok(()), Some(l)) => Err(l),
+            (Err(e), Some(l)) => Err(format!("{e}; {l}")),
+        }
+    }
+
     /// The commit in flight is over (returned, or stopped on an error): the
     /// deferred messages are handled now, in their order, before any message
     /// still in the mailbox — sending them back to the mailbox would put them
@@ -928,14 +952,12 @@ impl luciole::Actor for ShardActor {
                 }
             }
             ShardMsg::Commit { fast, reply } => {
-                // Writes lost since the last commit are reported here, as an
-                // error: a "successful" commit would have hidden them.
-                if !self.lost.is_empty() {
-                    let n = self.lost.len();
-                    let first: Vec<String> = self.lost.drain(..).take(3).collect();
-                    reply.send(Err(format!("{n} write(s) not applied since the last commit: {}", first.join("; "))));
-                    return ActorStatus::Continue;
-                }
+                // Writes lost since the last commit are reported by this
+                // commit, as an error once it is done: a "successful" commit
+                // would have hidden them, and refusing to commit would leave
+                // the writes that did apply uncommitted in this shard while
+                // the other shards commit theirs.
+                let lost = self.take_lost_report();
                 ctx.set_activity(format!("commit_drain shard_{}", self.shard_id));
                 // Step 1: Drain indexers — all pending DocsMsg processed first.
                 // FIFO guarantee: DrainMsg is behind all DocsMsg in the queue.
@@ -947,18 +969,19 @@ impl luciole::Actor for ShardActor {
                             match writer.drain_workers() {
                                 Ok(rxs) => rxs,
                                 Err(e) => {
-                                    reply.send(Err(format!("drain shard_{}: {e}", self.shard_id)));
+                                    reply.send(Self::commit_result(Err(format!("drain shard_{}: {e}", self.shard_id)), lost));
                                     return ActorStatus::Continue;
                                 }
                             }
                         }
                         None => {
-                            reply.send(Ok(()));
+                            reply.send(Self::commit_result(Ok(()), lost));
                             return ActorStatus::Continue;
                         }
                     }
                 };
 
+                self.lost_report = lost;
                 self.commit_in_flight = true;
                 if drain_rxs.is_empty() {
                     let _ = self.self_ref.as_ref().unwrap().send(ShardMsg::IndexersDrained {
@@ -993,12 +1016,12 @@ impl luciole::Actor for ShardActor {
                 let flush_rxs = match flushed {
                     Ok(Some(rxs)) => rxs,
                     Ok(None) => {
-                        reply.send(Ok(()));
+                        reply.send(Self::commit_result(Ok(()), self.lost_report.take()));
                         self.finish_commit(ctx);
                         return ActorStatus::Continue;
                     }
                     Err(e) => {
-                        reply.send(Err(e));
+                        reply.send(Self::commit_result(Err(e), self.lost_report.take()));
                         self.finish_commit(ctx);
                         return ActorStatus::Continue;
                     }
@@ -1055,7 +1078,7 @@ impl luciole::Actor for ShardActor {
             ShardMsg::CommitDone { result, reply } => {
                 ctx.set_activity(format!("commit_done shard_{}", self.shard_id));
                 // Step 4: Forward result to the original caller.
-                reply.send(result);
+                reply.send(Self::commit_result(result, self.lost_report.take()));
                 // The finalization has released the lock.
                 self.finish_commit(ctx);
             }
@@ -1093,6 +1116,7 @@ fn spawn_shard_pool(shards: &[Arc<LucivyHandle>]) -> luciole::Pool<ShardMsg> {
             commit_in_flight: false,
             deferred: std::collections::VecDeque::new(),
             lost: Vec::new(),
+            lost_report: None,
         }
     })
 }
