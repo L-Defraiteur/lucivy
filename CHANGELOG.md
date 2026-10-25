@@ -1,3 +1,33 @@
+Lucivy 4.3.1 — unreleased
+=========================
+
+- **Fixed: a commit could freeze under concurrent searches.** A shard's
+  commit finalizes on a task that holds the writer lock while it waits
+  cooperatively for the segment updater; that wait could run, on the same
+  thread, another message of the same shard that asks for the lock again —
+  an insert, a delete, the fast commit a search sends to see pending writes,
+  or the finalization of a second, interleaved commit. The thread waited on
+  itself and the shard never answered again (seen by rag3db during a reindex
+  read concurrently, three times out of three). One commit at most is now in
+  flight per shard: the inserts, deletes and commits that arrive meanwhile
+  are deferred and replayed when it ends, in their order and ahead of
+  anything that arrives after.
+
+- **Fixed: writes to a shard without a writer were dropped silently.** An
+  insert sent to a shard whose writer had been closed was thrown away, a
+  delete skipped, an error from `add_document` ignored, and `add_document`
+  then `commit` returned `Ok`. The shard now keeps every write it could not
+  apply, and the next commit still makes the writes that did apply durable,
+  then returns an error with the count and the first three.
+
+- **The playground starts its engine only on a cross-origin isolated page.**
+  GitHub Pages sends no COOP/COEP headers; the page's service worker adds
+  them, but only to a page it controls, and after a hard reload it did not
+  always reload the page: the threaded engine started anyway and failed with
+  `DataCloneError` (SharedArrayBuffer transfer). The page now waits for that
+  reload, reloads once itself if it does not come, and says so if isolation
+  still fails.
+
 Lucivy 4.3.0 — 14 September 2026
 ================================
 
