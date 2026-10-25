@@ -851,8 +851,8 @@ struct ShardActor {
     /// one commit at most is in flight per shard, and the writes and commits
     /// that follow wait for its `CommitDone`.
     commit_in_flight: bool,
-    /// Messages deferred while a commit is in flight, replayed when it ends,
-    /// in arrival order and ahead of anything that arrives after.
+    /// Messages deferred while a commit is in flight, sent back to the
+    /// mailbox when it ends, in arrival order.
     deferred: std::collections::VecDeque<ShardMsg>,
     /// **Writes this shard could not apply** since the last commit: no writer
     /// (dropped by `LucivyHandle::close`), or the document refused by the
@@ -888,19 +888,21 @@ impl ShardActor {
     }
 
     /// The commit in flight is over (returned, or stopped on an error): the
-    /// deferred messages are handled now, in their order, before any message
-    /// still in the mailbox — sending them back to the mailbox would put them
-    /// behind it, and an `Insert` of the new version of a document could then
-    /// run before the deferred `Delete` of the old one, which would remove it.
-    /// A deferred `Commit` starts a new commit in flight: what follows it stays
-    /// deferred, still ahead of later arrivals.
-    fn finish_commit(&mut self, ctx: &luciole::ActorContext) {
+    /// deferred messages go back to the mailbox, in their order, behind the
+    /// messages already waiting there. Known limit, read in the code and not
+    /// provoked: a deferred `Delete` replayed behind an `Insert` that arrived
+    /// after the commit's end would remove the new version of an updated
+    /// document. Open defect (25 October 2026): under four searching readers,
+    /// `test_commit_under_concurrent_searches_does_not_freeze` still fails
+    /// some runs, this way as with the in-place replay tried before — a
+    /// commit frozen for 60 s, a search waiting forever, or documents missing
+    /// with every commit answering `Ok`, next to many luciole warnings "Reply
+    /// dropped without send()".
+    fn finish_commit(&mut self) {
         self.commit_in_flight = false;
-        while !self.commit_in_flight {
-            let Some(m) = self.deferred.pop_front() else { break };
-            if let ActorStatus::Stop = luciole::Actor::handle(self, m, ctx) {
-                break;
-            }
+        let me = self.self_ref.as_ref().unwrap();
+        for m in self.deferred.drain(..) {
+            let _ = me.send(m);
         }
     }
 }
@@ -1000,9 +1002,8 @@ impl luciole::Actor for ShardActor {
             ShardMsg::IndexersDrained { fast, reply } => {
                 ctx.set_activity(format!("commit_flush shard_{}", self.shard_id));
                 // Step 2: All DocsMsg processed. Now flush indexers.
-                // The guard is dropped at the end of this block, before
-                // `finish_commit`: the deferred writes it replays take the
-                // writer lock again.
+                // The guard is dropped at the end of this block, before the
+                // reply and `finish_commit`.
                 let flushed = {
                     let mut guard = self.handle.writer.lock().unwrap();
                     match guard.as_mut() {
@@ -1017,12 +1018,12 @@ impl luciole::Actor for ShardActor {
                     Ok(Some(rxs)) => rxs,
                     Ok(None) => {
                         reply.send(Self::commit_result(Ok(()), self.lost_report.take()));
-                        self.finish_commit(ctx);
+                        self.finish_commit();
                         return ActorStatus::Continue;
                     }
                     Err(e) => {
                         reply.send(Self::commit_result(Err(e), self.lost_report.take()));
-                        self.finish_commit(ctx);
+                        self.finish_commit();
                         return ActorStatus::Continue;
                     }
                 };
@@ -1080,7 +1081,7 @@ impl luciole::Actor for ShardActor {
                 // Step 4: Forward result to the original caller.
                 reply.send(Self::commit_result(result, self.lost_report.take()));
                 // The finalization has released the lock.
-                self.finish_commit(ctx);
+                self.finish_commit();
             }
             ShardMsg::Delete { term } => {
                 let handle = Arc::clone(&self.handle);
