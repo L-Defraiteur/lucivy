@@ -26,6 +26,7 @@
 <meta name="twitter:image" content="https://l-defraiteur.github.io/lucivy/og-card.png">
 <!-- coi-serviceworker: fallback for servers without COOP/COEP headers.
      Prefer `node serve.mjs` which sets headers natively (no caching issues). -->
+<link rel="icon" href="data:,">
 <script src="coi-serviceworker.js"></script>
 <script>
 // Debug: capture all console output for inspection via window._allLogs
@@ -1859,6 +1860,31 @@ async function startup() {
   startupDone = new Promise(r => { resolveStartup = r; });
   try {
     statusEl.textContent = 'Loading WASM engine (threading)...';
+    // The engine runs on threads, which need a cross-origin isolated page.
+    // GitHub Pages sends no COOP/COEP headers: coi-serviceworker.js adds them,
+    // but only to a page its service worker controls. A first visit is
+    // reloaded by it once registered; a Ctrl+Shift+R bypasses the service
+    // worker and was not reloaded at all: the engine started anyway, threw a
+    // DataCloneError (SharedArrayBuffer transfer) and the page stayed dead.
+    // Wait for that reload, reload once ourselves if it does not come, and
+    // say so if isolation still fails (a private window, no service worker).
+    if (!window.crossOriginIsolated) {
+      statusEl.textContent = 'Preparing the page (cross-origin isolation)...';
+      await new Promise(r => setTimeout(r, 3000));
+      let reloaded = false;
+      try { reloaded = sessionStorage.getItem('lucivyCoiReload') === '1'; } catch {}
+      if (!reloaded && navigator.serviceWorker) {
+        try { sessionStorage.setItem('lucivyCoiReload', '1'); } catch {}
+        console.warn('[playground] not crossOriginIsolated: reloading once through the service worker');
+        location.reload();
+        return;
+      }
+      statusEl.textContent = 'This page needs cross-origin isolation for its threads and did not get it. '
+        + 'A private window may block the service worker that provides it.';
+      console.warn('[playground] not crossOriginIsolated after a reload: engine not started');
+      return;
+    }
+    try { sessionStorage.removeItem('lucivyCoiReload'); } catch {}
     // `?noopfs`: in-memory filesystem (index lost at reload) — isolates
     // OPFS from the engine when something stalls.
     const startupParams = new URLSearchParams(location.search);
