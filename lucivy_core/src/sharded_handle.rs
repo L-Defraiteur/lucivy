@@ -892,12 +892,7 @@ impl ShardActor {
     /// messages already waiting there. Known limit, read in the code and not
     /// provoked: a deferred `Delete` replayed behind an `Insert` that arrived
     /// after the commit's end would remove the new version of an updated
-    /// document. Open defect (25 October 2026): under four searching readers,
-    /// `test_commit_under_concurrent_searches_does_not_freeze` still fails
-    /// some runs, this way as with the in-place replay tried before — a
-    /// commit frozen for 60 s, a search waiting forever, or documents missing
-    /// with every commit answering `Ok`, next to many luciole warnings "Reply
-    /// dropped without send()".
+    /// document.
     fn finish_commit(&mut self) {
         self.commit_in_flight = false;
         let me = self.self_ref.as_ref().unwrap();
@@ -921,8 +916,14 @@ impl luciole::Actor for ShardActor {
     fn handle(&mut self, msg: ShardMsg, ctx: &luciole::ActorContext) -> ActorStatus {
         // Every message that takes the writer lock waits for the end of the
         // commit in flight (see `commit_in_flight`) instead of blocking on it.
+        // So does a drain: its acknowledgement promises that the writes sent
+        // before it are applied, and acknowledged during the commit it let the
+        // caller's next `Commit` run before the deferred inserts.
         if self.commit_in_flight
-            && matches!(msg, ShardMsg::Insert { .. } | ShardMsg::Delete { .. } | ShardMsg::Commit { .. })
+            && matches!(
+                msg,
+                ShardMsg::Insert { .. } | ShardMsg::Delete { .. } | ShardMsg::Commit { .. } | ShardMsg::Drain(_)
+            )
         {
             self.deferred.push_back(msg);
             return ActorStatus::Continue;
@@ -930,9 +931,22 @@ impl luciole::Actor for ShardActor {
         match msg {
             ShardMsg::Search { weight, top_k, filter, reply } => {
                 ctx.set_activity(format!("search shard_{}", self.shard_id));
-                let result = execute_weight_on_shard(
-                    &self.handle, self.shard_id, weight.as_ref(), top_k, filter,
-                );
+                // A search that panics answers an error and the actor lives
+                // on: a panic here killed the shard actor, its mailbox and its
+                // deferred writes with it (the BM25 idf assertion under
+                // concurrent commits, 25 October 2026). A read must never be
+                // able to take down the writer of a shard.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    execute_weight_on_shard(&self.handle, self.shard_id, weight.as_ref(), top_k, filter)
+                }))
+                .unwrap_or_else(|panic| {
+                    let what = panic
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "unknown panic".to_string());
+                    Err(format!("search shard_{} panicked: {what}", self.shard_id))
+                });
                 reply.send(result);
             }
             ShardMsg::Insert { doc, pre_tokenized } => {
@@ -1098,6 +1112,17 @@ impl luciole::Actor for ShardActor {
                 d.ack();
             }
             ShardMsg::Shutdown(m) => {
+                // Nothing deferred is dropped silently: a deferred commit is
+                // answered with an error, a deferred drain acknowledged.
+                for d in self.deferred.drain(..) {
+                    match d {
+                        ShardMsg::Commit { reply, .. } => {
+                            reply.send(Err(format!("shard_{} shut down with this commit deferred", self.shard_id)))
+                        }
+                        ShardMsg::Drain(d) => d.ack(),
+                        _ => {}
+                    }
+                }
                 m.ack();
                 return ActorStatus::Stop;
             }

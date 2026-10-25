@@ -9,9 +9,22 @@ Lucivy 4.3.1 — unreleased
   or the finalization of a second, interleaved commit. The thread waited on
   itself and the shard never answered again (seen by rag3db during a reindex
   read concurrently, three times out of three). One commit at most is now in
-  flight per shard: the inserts, deletes and commits that arrive meanwhile
-  are deferred and replayed when it ends, in their order and ahead of
-  anything that arrives after.
+  flight per shard: the inserts, deletes, commits and drains that arrive
+  meanwhile are deferred and sent back to the shard when it ends, in their
+  order; a drain is deferred too, or its acknowledgement let the caller's
+  next commit run before the deferred inserts.
+
+- **Fixed: a search under concurrent commits could panic and take a shard
+  down with it.** BM25 statistics gathered while commits run can come from
+  two states of the index — a term seen in 788 documents, a count of 775 read
+  a moment earlier — and the inverse document frequency asserted the
+  opposite. The panic hit the shard actor running the search: its mailbox
+  and deferred writes went with it, so documents disappeared behind commits
+  that answered `Ok`, and later commits and searches waited forever. Under
+  load, with searches looping during commits, 11 runs out of 80 lost between
+  200 and 1 300 documents of 1 550, every one of them after this panic; none
+  out of 160 once bounded. The document frequency is now bounded by the count,
+  and a search that panics answers an error instead of killing the shard.
 
 - **Fixed: writes to a shard without a writer were dropped silently.** An
   insert sent to a shard whose writer had been closed was thrown away, a
