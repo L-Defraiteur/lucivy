@@ -626,17 +626,23 @@ class TestPersistence:
         })
         assert any(r.doc_id == 1 for r in results)
 
-    def test_uncommitted_not_persisted(self, tmp_dir):
-        """Data added but not committed is lost on reopen."""
+    def test_release_commits_pending_writes(self, tmp_dir):
+        """Releasing the index closes it, and closing commits: a document added
+        without commit is there on reopen. Before 4.3.1 it depended on timing
+        (the add was still queued, or already applied), and this test said the
+        opposite."""
         path = os.path.join(tmp_dir, "persist_uncommit")
-        idx = lucivy.Index.create(path, FIELDS)
-        idx.add(doc_id=1, title="Committed", body="This is committed")
-        idx.commit()
-        idx.add(doc_id=2, title="Not committed", body="This should vanish")
-        del idx
+        for _ in range(20):
+            shutil.rmtree(path, ignore_errors=True)
+            idx = lucivy.Index.create(path, FIELDS)
+            idx.add(doc_id=1, title="Committed", body="This is committed")
+            idx.commit()
+            idx.add(doc_id=2, title="Not committed", body="Committed by the release")
+            del idx
 
-        idx2 = lucivy.Index.open(path)
-        assert idx2.num_docs == 1
+            idx2 = lucivy.Index.open(path)
+            assert idx2.num_docs == 2
+            del idx2
 
     @pytest.mark.skip(reason="Index.rollback() is not part of the binding (never was)")
     def test_rollback(self, tmp_dir):
