@@ -533,6 +533,16 @@ Publier reste une décision explicite de Lucie.
 Chemin suivi : branche de travail → PR vers `main` → fusion en avance rapide → tag sur `main`. Deux aléas en route :
 un `startup_failure` de GitHub (relancé, sans rapport avec nos fichiers) et un test qui comparait un top-10 d'ex æquo
 (`test_snapshot_served`, corrigé comme le roundtrip LUCE l'avait été).
+**4.3.1 publiée le 25 octobre 2026 vers 20 h** (tag `v4.3.1`, `main` = `8561f72`, PR #20 depuis la branche `4.3.1`,
+rebase ; tag posé par la session sur autorisation de Lucie, après la CI verte du SHA exact) : concurrence du `ShardedHandle`
+— une recherche sous commits concurrents paniquait dans `idf()` (`src/query/bm25.rs`, statistiques de deux états de
+l'index) et tuait l'acteur de shard qui la servait, avec sa boîte et ses écritures différées (documents perdus derrière des
+commits `Ok`, gels) ; un commit en vol par shard, les écritures, commits et drains différés et traités sur place à sa fin ;
+fermer commite toujours (le drop passe par `close()`) ; les écritures d'un shard sans écrivain dites par le commit suivant ;
+la page isolée avant le moteur. Sous charge, le code d'avant (`bb07627`) perdait 11 fois sur 80, la 4.3.1 0 fois ; parité
+navigateur 21/21 sur 10 000 fichiers. Tout sorti du premier coup (PyPI 5 wheels + sdist, npm ×7, crates.io ×5,
+`lucivy-fst` inchangé en 0.1.1, release GitHub 12 artefacts). Relecture et chiffres : `docs/25-10-2026/02-relecture-4.3.1.md`
+(branche `docs-pipeline-publication`), pipeline : `01-pipeline-de-publication.md`.
 **4.3.0 publiée le 14 septembre 2026 au petit matin** (tag `v4.3.0`, `main` = `8e47953`, PR #19 depuis les branches
 empilées `v4.3` → `4.3.0.1-commit-path` → `4.3.0.2-minted-pair`, rebase) : indexation 48 → 35 s à index égal, deux
 correctifs d'exactitude présents depuis 4.0.0, la paire mintée renommée ; tout est sorti du premier coup (PyPI 5 wheels +
@@ -567,10 +577,10 @@ et à l'environnement `release`).
 
 | Registre | Package | Publié | Date |
 |----------|---------|---------|---------|
-| PyPI | `lucivy` | **4.3.0** (14 septembre 2026), **4.2.0** (13 septembre 2026 au soir), **4.1.0** (13 septembre 2026), **4.0.0**, **4.0.1**, **4.0.2** (5 wheels `cp39-abi3` : manylinux_2_28 x86_64 + aarch64, macOS x86_64 + arm64, win_amd64 ; + sdist) — par le tag | 6 septembre 2026 (nuit, puis 14 h 30) |
-| npm | `lucivy` + `lucivy-linux-x64-gnu`, `lucivy-linux-arm64-gnu`, `lucivy-darwin-x64`, `lucivy-darwin-arm64`, `lucivy-windows-x64` | **4.3.0**, **4.2.0**, **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** — par le tag | 6 septembre 2026 (nuit, puis 14 h 30) |
-| npm | `lucivy-wasm` | **4.3.0**, **4.2.0**, **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** (job `wasm` + `publish-wasm`) | 6 septembre 2026 (nuit, puis 14 h 30) |
-| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` (+ `lucivy-fst` 0.1.x) | **4.3.0** (14 septembre, par le tag, d'un coup), **4.2.0** (le 13 septembre au soir : `luciole` et `lucistore` par le tag, `lucivy-fst` 0.1.1, `ld-lucivy`, `lucivy-core` et `sparse-vector` par le dispatch de rattrapage), **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** — par le tag, en dernier | 6 septembre 2026 (nuit, puis 14 h 30) |
+| PyPI | `lucivy` | **4.3.1** (25 octobre 2026), **4.3.0** (14 septembre 2026), **4.2.0** (13 septembre 2026 au soir), **4.1.0** (13 septembre 2026), **4.0.0**, **4.0.1**, **4.0.2** (5 wheels `cp39-abi3` : manylinux_2_28 x86_64 + aarch64, macOS x86_64 + arm64, win_amd64 ; + sdist) — par le tag | 6 septembre 2026 (nuit, puis 14 h 30) |
+| npm | `lucivy` + `lucivy-linux-x64-gnu`, `lucivy-linux-arm64-gnu`, `lucivy-darwin-x64`, `lucivy-darwin-arm64`, `lucivy-windows-x64` | **4.3.1**, **4.3.0**, **4.2.0**, **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** — par le tag | 6 septembre 2026 (nuit, puis 14 h 30) |
+| npm | `lucivy-wasm` | **4.3.1**, **4.3.0**, **4.2.0**, **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** (job `wasm` + `publish-wasm`) | 6 septembre 2026 (nuit, puis 14 h 30) |
+| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` (+ `lucivy-fst` 0.1.x) | **4.3.1** (25 octobre, par le tag, d'un coup), **4.3.0** (14 septembre, par le tag, d'un coup), **4.2.0** (le 13 septembre au soir : `luciole` et `lucistore` par le tag, `lucivy-fst` 0.1.1, `ld-lucivy`, `lucivy-core` et `sparse-vector` par le dispatch de rattrapage), **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** — par le tag, en dernier | 6 septembre 2026 (nuit, puis 14 h 30) |
 | (avant) | tout | 3.0.7 le 28 août (nuit), 3.0.8 le 28 août à 15 h | |
 
 3.0.7 dans la nuit du 27 au 28, juste après 3.0.6 : **le fuzzy relâché
