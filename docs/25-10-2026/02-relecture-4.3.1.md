@@ -81,3 +81,40 @@ tag.
 - PR `4.3.1` → `main`, CI verte sur le SHA exact de `main` après la fusion, puis le tag
   `v4.3.1` par Lucie (voir `01-pipeline-de-publication.md`). `bindings/nodejs/package-lock.json`
   porte encore 3.0.0, comme en 4.3.0 : laissé tel quel.
+
+## 6. Suite de la journée : le rouge Python, puis la vraie cause (ajouté vers 18 h 20)
+
+*Cette section corrige les §§ 1 à 5 : le rejeu, les chiffres de la suite et « ce qui manque »
+ont changé. Branche `4.3.1` = `184b4c4` (WASM) sur `a925d94` (Rust).*
+
+**Le rouge Python** (`test_uncommitted_not_persisted`) était une course : le drop de
+`ShardedHandle` fermait les shards sans passer par leurs acteurs, les écritures encore en file
+se perdaient ou passaient selon le moment. Règle A, décision de Lucie : fermer, c'est
+commiter, et le drop passe par `close()` (`eb969ee`). Témoin
+`test_drop_commits_the_writes_still_queued` : ancien drop 377 à 381 documents sur 501, rouge 3/3 ;
+nouveau, vert 3/3. Le test Python attend maintenant le document (20 tours).
+
+**En creusant, le test du gel s'est révélé intermittent, code de G compris** (tous les chiffres
+sous charge, luciepc, toute la série `sharded_handle` en parallèle) : `bb07627` 11 échecs sur 80
+— pertes de 200 à 1 300 documents sur 1 550 derrière des commits rendus `Ok`, et des gels.
+**La cause** : `idf()` (`src/query/bm25.rs`) assertait `doc_count >= doc_freq` ; sous commits
+concurrents les statistiques viennent de deux états de l'index (« 775 >= 788 »), la panique
+tombait sur l'acteur de shard qui servait la recherche, qui mourait avec sa boîte et ses
+écritures différées. Les 11 échecs portent chacun quatre paniques bm25 ; une seule passe verte
+en portait. Bornée (`211d3bf`) : 0 sur 80 sur le code de G, 0 sur 80 avec le reste.
+
+**Ce que la 4.3.1 porte en plus** : le `Search` de l'acteur rattrape une panique (une lecture ne
+tue plus l'écrivain d'un shard) ; le `Drain` attend la fin du commit en vol (piste de G : son
+acquittement laissait le `Commit` suivant passer devant les `Insert` différés) ; au `Shutdown`,
+les `Commit` différés reçoivent une erreur au lieu d'être jetés ; le rejeu des différés **sur
+place** (`a925d94`) — l'inversion `Delete`/`Insert` du rejeu par la boîte a été provoquée une
+fois sur 80 sur `211d3bf` (document 7 disparu). Mes premières pertes « du rejeu sur place »
+venaient de la panique de l'IDF : avec la borne, 0 sur 40 dans chaque forme sous une charge de 50
+à 77.
+
+**Sur `a925d94`** : clippy ×2, lib 1 480, lucivy-core 209, 0 échec ; Python 113 et Node verts sur
+`211d3bf` (code identique pour eux). WASM rebâti et commité (`184b4c4`, `BUILD 4.3.1-a925d94`).
+
+**Reste avant le tag** : le panel de parité navigateur sur 10 000 fichiers, la PR, la fusion et
+le tag par Lucie. À ouvrir en ticket : côté luciole, un acteur qui meurt devrait répondre une
+erreur à chaque message de sa boîte au lieu de « Reply dropped » silencieux (garde 2 de G).
