@@ -10,9 +10,11 @@ Lucivy 4.3.1 — unreleased
   itself and the shard never answered again (seen by rag3db during a reindex
   read concurrently, three times out of three). One commit at most is now in
   flight per shard: the inserts, deletes, commits and drains that arrive
-  meanwhile are deferred and sent back to the shard when it ends, in their
-  order; a drain is deferred too, or its acknowledgement let the caller's
-  next commit run before the deferred inserts.
+  meanwhile are deferred and handled when it ends, in their order and ahead
+  of anything that arrived after (sent back behind it, a deferred delete of
+  an updated document's old version ran after the insert of its new one and
+  removed it); a drain is deferred too, or its acknowledgement let the
+  caller's next commit run before the deferred inserts.
 
 - **Fixed: a search under concurrent commits could panic and take a shard
   down with it.** BM25 statistics gathered while commits run can come from
