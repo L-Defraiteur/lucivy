@@ -143,10 +143,22 @@ fn long_fuzzy_query_finds_its_passage() {
     let mid = (bytes.len() / 2..bytes.len()).find(|&i| bytes[i].is_ascii_lowercase()).unwrap();
     bytes[mid] = if bytes[mid] == b'x' { b'y' } else { b'x' };
     let typo = String::from_utf8(bytes).unwrap();
-    let q = whole(&[typo], 1);
-    let sink = Arc::new(HighlightSink::new());
-    let hits = handle.search(&q, 10, Some(sink.clone())).unwrap();
-    let ids = handle.node_ids_of(&hits).unwrap();
+    let found = |value: &str, distance: u8| -> Vec<u64> {
+        let q = whole(&[value.to_string()], distance);
+        let hits = handle.search(&q, 10, Some(Arc::new(HighlightSink::new()))).unwrap();
+        handle.node_ids_of(&hits).unwrap()
+    };
+    let half = passage.len() / 2;
+    let half = (half..passage.len()).find(|&i| passage.is_char_boundary(i)).unwrap();
+    eprintln!(
+        "passage {} bytes: exact d=0 {:?}, first half d=0 {:?}, second half d=0 {:?}, typo d=1 {:?}",
+        passage.len(),
+        found(passage, 0),
+        found(&passage[..half], 0),
+        found(&passage[half..], 0),
+        found(&typo, 1),
+    );
+    let ids = found(&typo, 1);
     assert!(ids.contains(&0), "the passage at distance 1 was not found: {ids:?}");
 }
 
