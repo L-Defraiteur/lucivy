@@ -116,3 +116,37 @@ fn fuzzy_query_cost_is_bounded_in_its_length() {
         "a 200-word text searched whole at distance 1 on two documents took {whole_d1_at_200} ms (budget {BUDGET_MS} ms)"
     );
 }
+
+/// **A long fuzzy query still finds what it should.** Above 64 bytes the
+/// piece partition is searched near the even split only; any partition
+/// keeps the pigeonhole sound, so recall must not move. A passage of the
+/// first document, 300 bytes or more, with one letter changed, searched whole
+/// at distance 1 on four shards: the first document comes back, with a span.
+#[test]
+fn long_fuzzy_query_finds_its_passage() {
+    let (handle, _) = index();
+    let text = DOCUMENTS[0];
+    // A passage of plain prose (ASCII letters and spaces), long enough.
+    let start = text.find("Le ").unwrap_or(0);
+    let mut end = start;
+    let mut taken = 0;
+    for (i, c) in text[start..].char_indices() {
+        end = start + i + c.len_utf8();
+        taken += 1;
+        if taken >= 300 {
+            break;
+        }
+    }
+    let passage = &text[start..end];
+    // One substitution in the middle of the passage, on an ASCII letter.
+    let mut bytes = passage.as_bytes().to_vec();
+    let mid = (bytes.len() / 2..bytes.len()).find(|&i| bytes[i].is_ascii_lowercase()).unwrap();
+    bytes[mid] = if bytes[mid] == b'x' { b'y' } else { b'x' };
+    let typo = String::from_utf8(bytes).unwrap();
+    let q = whole(&[typo], 1);
+    let sink = Arc::new(HighlightSink::new());
+    let hits = handle.search(&q, 10, Some(sink.clone())).unwrap();
+    let ids = handle.node_ids_of(&hits).unwrap();
+    assert!(ids.contains(&0), "the passage at distance 1 was not found: {ids:?}");
+}
+
