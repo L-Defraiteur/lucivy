@@ -554,14 +554,19 @@ pub(crate) fn generate_trigrams(query: &str, distance: u8) -> (Vec<String>, Vec<
 /// Shortest piece `choose_pieces` considers, in bytes.
 pub(super) const PIECE_MIN_BYTES: usize = 2;
 
-/// Up to this length (lowercased bytes) a piece partition is searched among
-/// every cut; above it, each cut is searched only within
-/// `PIECE_CUT_WINDOW_BYTES` of the even split. Any partition into `d + 1`
-/// pieces keeps the pigeonhole sound — choosing the cheapest is an
-/// optimisation — but the exhaustive search prices O(n^d) pieces, and the
-/// plan anticipated every substring: a 1 356-byte query at distance 1 on four
-/// shards took 15.8 s, against 10 ms on one shard that skipped the plan
-/// (ticket of 7 November 2026, `test_fuzzy_many_terms`).
+/// Up to this length (lowercased bytes), or at distance 1, a piece partition
+/// is searched among every cut; above it, at distance 2 or more, each cut is
+/// searched only within `PIECE_CUT_WINDOW_BYTES` of the even split. Any
+/// partition into `d + 1` pieces keeps the pigeonhole sound — choosing the
+/// cheapest is an optimisation — but the exhaustive search prices O(n^d)
+/// pieces. At distance 1 that is O(n) (prefixes and suffixes) and it stays
+/// exhaustive: the cheapest cut is often a short piece, and a long literal
+/// piece is not always found (a passage of a document stops being found
+/// from 48 to 64 bytes — `probe_exact_passage_lengths`, ticket of 7 November
+/// 2026), so windowing there lost a passage that the exhaustive cut found.
+/// The cost at distance 1 came from the plan, which anticipated every
+/// substring: a 1 356-byte query on four shards took 15.8 s
+/// (`test_fuzzy_many_terms`).
 pub(super) const PIECE_EXHAUSTIVE_MAX_BYTES: usize = 64;
 pub(super) const PIECE_CUT_WINDOW_BYTES: usize = 16;
 
@@ -579,7 +584,7 @@ pub(super) fn piece_cut_positions(lower: &str, k: usize, cut: usize) -> Vec<usiz
         return vec![n];
     }
     let near = |i: usize| {
-        n <= PIECE_EXHAUSTIVE_MAX_BYTES || (cut * n / k).abs_diff(i) <= PIECE_CUT_WINDOW_BYTES
+        n <= PIECE_EXHAUSTIVE_MAX_BYTES || k <= 2 || (cut * n / k).abs_diff(i) <= PIECE_CUT_WINDOW_BYTES
     };
     (1..n).filter(|&i| lower.is_char_boundary(i) && near(i)).collect()
 }
