@@ -194,3 +194,44 @@ fn probe_exact_passage_lengths() {
     }
 }
 
+/// Probe: for several passages, the shortest exact prefix that is no longer
+/// found, and the text around the failing end.
+#[test]
+#[ignore = "probe: -- --ignored --nocapture"]
+fn probe_first_failing_length() {
+    let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+        "fields": [{"name": "content", "type": "text", "stored": true}], "shards": 1
+    })).unwrap();
+    let handle = ShardedHandle::create(&tmp_dir("lucivy_probe_first"), &config).unwrap();
+    for (i, text) in DOCUMENTS.iter().enumerate() {
+        handle.add_document_json(i as u64, &serde_json::json!({"content": text})).unwrap();
+    }
+    handle.commit().unwrap();
+    let text = DOCUMENTS[0];
+    let found = |v: &str, strict: bool| -> bool {
+        let q: QueryConfig = serde_json::from_value(serde_json::json!({
+            "type": "contains", "field": "content", "value": v, "strict_separators": strict
+        })).unwrap();
+        handle.node_ids_of(&handle.search(&q, 10, None).unwrap()).unwrap().contains(&0)
+    };
+    let starts: Vec<usize> = text.match_indices("\nLe ").map(|(i, _)| i + 1).take(8)
+        .chain(text.match_indices(" la ").map(|(i, _)| i + 1).take(4)).collect();
+    for start in starts {
+        for strict in [false, true] {
+            let mut fail = None;
+            for len in 2..400 {
+                let end = start + len;
+                if end > text.len() { break; }
+                if !text.is_char_boundary(end) { continue; }
+                if !found(&text[start..end], strict) { fail = Some(end); break; }
+            }
+            match fail {
+                Some(end) => eprintln!("start {start} {}: first miss at {} bytes, tail {:?}",
+                    if strict { "strict " } else { "relaxed" }, end - start,
+                    &text[end.saturating_sub(24).max(start)..end]),
+                None => eprintln!("start {start} {}: found up to 400 bytes", if strict { "strict " } else { "relaxed" }),
+            }
+        }
+    }
+}
+
