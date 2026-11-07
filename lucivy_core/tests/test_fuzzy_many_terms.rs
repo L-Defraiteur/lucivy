@@ -162,3 +162,35 @@ fn long_fuzzy_query_finds_its_passage() {
     assert!(ids.contains(&0), "the passage at distance 1 was not found: {ids:?}");
 }
 
+/// Probe: from which length an exact passage of a document stops being found.
+#[test]
+#[ignore = "probe: -- --ignored --nocapture"]
+fn probe_exact_passage_lengths() {
+    for shards in [1usize, 4] {
+        let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+            "fields": [{"name": "content", "type": "text", "stored": true}], "shards": shards
+        })).unwrap();
+        let handle = ShardedHandle::create(&tmp_dir(&format!("lucivy_probe_{shards}")), &config).unwrap();
+        for (i, text) in DOCUMENTS.iter().enumerate() {
+            handle.add_document_json(i as u64, &serde_json::json!({"content": text})).unwrap();
+        }
+        handle.commit().unwrap();
+        let text = DOCUMENTS[0];
+        let start = text.find("Le ").unwrap_or(0);
+        let mut line = format!("shards {shards}:");
+        for len in [4usize, 8, 16, 24, 32, 48, 64, 96, 128, 200, 300] {
+            let end = (start + len..text.len()).find(|&i| text.is_char_boundary(i)).unwrap();
+            let passage = &text[start..end];
+            for strict in [false, true] {
+                let q: QueryConfig = serde_json::from_value(serde_json::json!({
+                    "type": "contains", "field": "content", "value": passage, "strict_separators": strict
+                })).unwrap();
+                let ids = handle.node_ids_of(&handle.search(&q, 10, None).unwrap()).unwrap();
+                line.push_str(&format!(" {len}{}={}", if strict { "s" } else { "r" }, ids.contains(&0) as u8));
+            }
+        }
+        eprintln!("{line}");
+        eprintln!("passage start: {:?}", &text[start..(start + 120).min(text.len())]);
+    }
+}
+
