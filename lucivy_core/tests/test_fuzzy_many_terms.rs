@@ -30,15 +30,25 @@ fn tmp_dir(name: &str) -> String {
     p.to_str().unwrap().to_string()
 }
 
-/// Prose: the words of lucivy's README, in order (a user's text, not
-/// random letters — the fuzzy path looks its candidates up by trigrams).
-fn prose() -> Vec<String> {
-    include_str!("../../README.md")
-        .split_whitespace()
-        .filter(|w| w.chars().any(|c| c.is_alphanumeric()))
-        .map(|w| w.to_string())
+/// The query: the distinct words of a page of French prose, three letters or
+/// more, lowercased, in order of appearance — what « recherche »'s probe sent
+/// (a user's prompt, not identifiers).
+fn query_words() -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    include_str!("../../docs/13-09-2026/10-knowledge-dump.md")
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 3)
+        .map(str::to_lowercase)
+        .filter(|w| seen.insert(w.clone()))
         .collect()
 }
+
+/// The two documents: two other pages of the same prose (same vocabulary,
+/// different text), as the two notes of the base the probe measured.
+const DOCUMENTS: [&str; 2] = [
+    include_str!("../../docs/13-09-2026/07-indexation-profil.md"),
+    include_str!("../../docs/13-09-2026/09-architecture.md"),
+];
 
 fn index() -> (ShardedHandle, Vec<String>) {
     let config: SchemaConfig = serde_json::from_value(serde_json::json!({
@@ -47,17 +57,13 @@ fn index() -> (ShardedHandle, Vec<String>) {
     }))
     .unwrap();
     let handle = ShardedHandle::create(&tmp_dir("lucivy_fuzzy_many_terms"), &config).unwrap();
-    // Two documents of prose, the second half of the README: the query (the
-    // first 200 words) shares its vocabulary with them, not its text.
-    let words = prose();
-    let rest = &words[200..];
-    for (i, half) in rest.chunks(rest.len() / 2 + 1).take(2).enumerate() {
+    for (i, text) in DOCUMENTS.iter().enumerate() {
         handle
-            .add_document_json(i as u64, &serde_json::json!({"content": half.join(" ")}))
+            .add_document_json(i as u64, &serde_json::json!({"content": text}))
             .unwrap();
     }
     handle.commit().unwrap();
-    (handle, words)
+    (handle, query_words())
 }
 
 fn whole(terms: &[String], distance: u8) -> QueryConfig {
@@ -84,6 +90,7 @@ fn time_ms(handle: &ShardedHandle, q: &QueryConfig) -> (u128, usize) {
 #[ignore = "timing witness: run with --release -- --ignored --nocapture"]
 fn fuzzy_query_cost_is_bounded_in_its_length() {
     let (handle, words) = index();
+    assert!(words.len() >= 200, "the page has {} distinct words, 200 are needed", words.len());
     let mut whole_d1_at_200 = 0;
     println!("words  chars  whole d=0 ms  whole d=1 ms  by word d=1 ms");
     for n in [1usize, 4, 8, 16, 32, 64, 128, 200] {
