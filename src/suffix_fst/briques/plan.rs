@@ -224,18 +224,11 @@ impl FuzzyJob {
                 let lower = self.query.to_lowercase();
                 let (ngrams, _, _) = composite::generate_trigrams(&self.query, self.distance);
                 let mut wanted: Vec<String> = ngrams;
-                // Every piece `choose_pieces` may price: [a, b) on char
-                // boundaries, at least PIECE_MIN_BYTES long.
-                let cuts: Vec<usize> = std::iter::once(0)
-                    .chain((1..lower.len()).filter(|&i| lower.is_char_boundary(i)))
-                    .chain(std::iter::once(lower.len()))
-                    .collect();
-                for (i, &a) in cuts.iter().enumerate() {
-                    for &b in &cuts[i + 1..] {
-                        if b - a >= composite::PIECE_MIN_BYTES {
-                            wanted.push(lower[a..b].to_string());
-                        }
-                    }
+                // Exactly the pieces `choose_pieces` may price. Every
+                // substring, as before, was O(n²) FST counts: 15.8 s for a
+                // 1 356-byte query at distance 1 (ticket of 7 November 2026).
+                for (a, b) in composite::priceable_pieces(&lower, self.distance) {
+                    wanted.push(lower[a..b].to_string());
                 }
                 wanted.sort();
                 wanted.dedup();
