@@ -554,6 +554,57 @@ pub(crate) fn generate_trigrams(query: &str, distance: u8) -> (Vec<String>, Vec<
 /// Shortest piece `choose_pieces` considers, in bytes.
 pub(super) const PIECE_MIN_BYTES: usize = 2;
 
+/// Up to this length (lowercased bytes) a piece partition is searched among
+/// every cut; above it, each cut is searched only within
+/// `PIECE_CUT_WINDOW_BYTES` of the even split. Any partition into `d + 1`
+/// pieces keeps the pigeonhole sound — choosing the cheapest is an
+/// optimisation — but the exhaustive search prices O(n^d) pieces, and the
+/// plan anticipated every substring: a 1 356-byte query at distance 1 on four
+/// shards took 15.8 s, against 10 ms on one shard that skipped the plan
+/// (ticket of 7 November 2026, `test_fuzzy_many_terms`).
+pub(super) const PIECE_EXHAUSTIVE_MAX_BYTES: usize = 64;
+pub(super) const PIECE_CUT_WINDOW_BYTES: usize = 16;
+
+/// The positions the `cut`-th cut (1-based, of `k - 1`) of a `k`-piece
+/// partition of `lower` may take: every char boundary for a short query,
+/// the boundaries near `cut * len / k` for a long one. `0` and `len` for the
+/// partition's ends. Shared by `choose_pieces` and the plan, so the plan
+/// anticipates exactly the pieces that may be priced.
+pub(super) fn piece_cut_positions(lower: &str, k: usize, cut: usize) -> Vec<usize> {
+    let n = lower.len();
+    if cut == 0 {
+        return vec![0];
+    }
+    if cut >= k {
+        return vec![n];
+    }
+    let near = |i: usize| {
+        n <= PIECE_EXHAUSTIVE_MAX_BYTES || (cut * n / k).abs_diff(i) <= PIECE_CUT_WINDOW_BYTES
+    };
+    (1..n).filter(|&i| lower.is_char_boundary(i) && near(i)).collect()
+}
+
+/// Every piece `[a, b)` that `choose_pieces` may price for a `distance + 1`
+/// partition of `lower`: piece `p` starts at a position of cut `p` and ends
+/// at a position of cut `p + 1`, at least `PIECE_MIN_BYTES` long.
+pub(super) fn priceable_pieces(lower: &str, distance: u8) -> Vec<(usize, usize)> {
+    let k = distance as usize + 1;
+    let mut out = Vec::new();
+    for p in 0..k {
+        let ends = piece_cut_positions(lower, k, p + 1);
+        for a in piece_cut_positions(lower, k, p) {
+            for &b in &ends {
+                if b >= a + PIECE_MIN_BYTES {
+                    out.push((a, b));
+                }
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 /// How a fuzzy query finds its candidate regions — decided from the FST
 /// candidate counts alone, so a plan (`briques::plan`) and the segments
 /// make the same choice: see `resolve_trigrams_v3` for the three
@@ -765,11 +816,18 @@ pub(crate) fn choose_pieces(
         })
     };
 
-    // Enumerate partitions into k pieces of >= MIN_PIECE bytes; queries are
-    // short (<= 64 bytes) and k <= 4, the count stays small.
+    // Enumerate partitions into k pieces of >= MIN_PIECE bytes. A short
+    // query (<= PIECE_EXHAUSTIVE_MAX_BYTES) tries every cut; a long one only
+    // the cuts near the even split (`piece_cut_positions`), or the count
+    // grows as n^(k-1).
+    let allowed: Vec<std::collections::HashSet<usize>> = (0..=k)
+        .map(|c| piece_cut_positions(&lower, k, c).into_iter().collect())
+        .collect();
     let mut best: Option<(usize, Vec<(usize, usize)>)> = None;
+    #[allow(clippy::too_many_arguments)]
     fn rec(
-        bounds: &[usize], start_idx: usize, left: usize, acc: &mut Vec<(usize, usize)>,
+        bounds: &[usize], allowed: &[std::collections::HashSet<usize>], k: usize,
+        start_idx: usize, left: usize, acc: &mut Vec<(usize, usize)>,
         acc_cost: usize, best: &mut Option<(usize, Vec<(usize, usize)>)>,
         piece_cost: &mut dyn FnMut(usize, usize) -> usize,
     ) {
@@ -784,19 +842,22 @@ pub(crate) fn choose_pieces(
             }
             return;
         }
+        // This piece ends at the cut numbered `k - left + 1`.
+        let cut = k - left + 1;
         for j in (start_idx + 1)..bounds.len() - 1 {
             let b = bounds[j];
             if b - a < MIN_PIECE { continue; }
             if bounds[bounds.len() - 1] - b < (left - 1) * MIN_PIECE { break; }
+            if !allowed[cut].contains(&b) { continue; }
             let c = acc_cost + piece_cost(a, b);
             if best.as_ref().is_some_and(|(bc, _)| c >= *bc) { continue; }
             acc.push((a, b));
-            rec(bounds, j, left - 1, acc, c, best, piece_cost);
+            rec(bounds, allowed, k, j, left - 1, acc, c, best, piece_cost);
             acc.pop();
         }
     }
     let mut acc = Vec::new();
-    rec(&bounds, 0, k, &mut acc, 0, &mut best, &mut piece_cost);
+    rec(&bounds, &allowed, k, 0, k, &mut acc, 0, &mut best, &mut piece_cost);
     best
 }
 
