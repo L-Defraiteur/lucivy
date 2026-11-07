@@ -15,7 +15,10 @@
 //! 0 and 1, word by word at distance 1) and fails when the 200-word fuzzy
 //! whole text takes longer than the budget.
 
+use std::sync::Arc;
 use std::time::Instant;
+
+use ld_lucivy::query::HighlightSink;
 
 use lucivy_core::query::{QueryConfig, SchemaConfig};
 use lucivy_core::sharded_handle::ShardedHandle;
@@ -53,7 +56,7 @@ const DOCUMENTS: [&str; 2] = [
 fn index() -> (ShardedHandle, Vec<String>) {
     let config: SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [{"name": "content", "type": "text", "stored": true}],
-        "shards": 1
+        "shards": 4
     }))
     .unwrap();
     let handle = ShardedHandle::create(&tmp_dir("lucivy_fuzzy_many_terms"), &config).unwrap();
@@ -80,9 +83,12 @@ fn word_by_word(terms: &[String], distance: u8) -> QueryConfig {
     .unwrap()
 }
 
-fn time_ms(handle: &ShardedHandle, q: &QueryConfig) -> (u128, usize) {
+/// One search, timed; `highlights` passes a sink, as rag3weaver always does
+/// (`fts_handle::search_hits_with_text`).
+fn time_ms(handle: &ShardedHandle, q: &QueryConfig, highlights: bool) -> (u128, usize) {
+    let sink = highlights.then(|| Arc::new(HighlightSink::new()));
     let t0 = Instant::now();
-    let hits = handle.search(q, 20, None).unwrap();
+    let hits = handle.search(q, 30, sink).unwrap();
     (t0.elapsed().as_millis(), hits.len())
 }
 
@@ -92,16 +98,17 @@ fn fuzzy_query_cost_is_bounded_in_its_length() {
     let (handle, words) = index();
     assert!(words.len() >= 200, "the page has {} distinct words, 200 are needed", words.len());
     let mut whole_d1_at_200 = 0;
-    println!("words  chars  whole d=0 ms  whole d=1 ms  by word d=1 ms");
+    println!("words  chars  whole d=0  whole d=1  whole d=1+hl  by word d=1+hl   (ms)");
     for n in [1usize, 4, 8, 16, 32, 64, 128, 200] {
         let terms = &words[..n];
         let chars = terms.join(" ").chars().count();
-        let (w0, _) = time_ms(&handle, &whole(terms, 0));
-        let (w1, _) = time_ms(&handle, &whole(terms, 1));
-        let (s1, _) = time_ms(&handle, &word_by_word(terms, 1));
-        println!("{n:5}  {chars:5}  {w0:12}  {w1:12}  {s1:14}");
+        let (w0, _) = time_ms(&handle, &whole(terms, 0), true);
+        let (w1, _) = time_ms(&handle, &whole(terms, 1), false);
+        let (w1h, _) = time_ms(&handle, &whole(terms, 1), true);
+        let (s1h, _) = time_ms(&handle, &word_by_word(terms, 1), true);
+        println!("{n:5}  {chars:5}  {w0:9}  {w1:9}  {w1h:12}  {s1h:14}");
         if n == 200 {
-            whole_d1_at_200 = w1;
+            whole_d1_at_200 = w1h;
         }
     }
     assert!(
