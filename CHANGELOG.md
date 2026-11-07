@@ -1,5 +1,5 @@
-Lucivy 4.3.2 — unreleased
-=========================
+Lucivy 4.3.2 — 7 November 2026
+===============================
 
 Fixes only: the index format is unchanged, and indexes written by 4.3.1 or
 earlier answer as before.
