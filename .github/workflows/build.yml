@@ -5,14 +5,9 @@
 #
 # Runs on a pull request to main (so a release branch is built on the five
 # platforms before it lands), on a push to main that touches the bindings, by
-# hand, every Monday morning, and called by release.yml — whose publish jobs
-# take these very artefacts: a called workflow's jobs belong to the caller's
-# run. Publishes nothing itself.
-#
-# The weekly run is there for what changes without us: a runner image that
-# GitHub retires or announces retiring (macos-14 went away unannounced to us
-# and failed the 4.3.2 pull request in one second), a toolchain or SDK that
-# `macos-latest` brings in. Better found on a Monday than on a release night.
+# hand, and called by release.yml — whose publish jobs take these very
+# artefacts: a called workflow's jobs belong to the caller's run. Publishes
+# nothing itself.
 
 name: build
 
@@ -28,8 +23,6 @@ on:
       - 'bindings/emscripten/**'
   workflow_call:
   workflow_dispatch:
-  schedule:
-    - cron: '17 6 * * 1'
 
 permissions:
   contents: read
@@ -61,8 +54,8 @@ jobs:
           # Intel macOS is cross-compiled from the arm64 runner (GitHub no
           # longer serves macos-13); its wheel is not smoke-tested here.
           # `macos-latest`, not a number: GitHub retires the numbered images
-          # (macos-14 in November 2026), the weekly run catches what latest
-          # changes.
+          # (macos-14 in November 2026 failed the 4.3.2 pull request in one
+          # second); a build that latest breaks shows on the next pull request.
           - { name: macos-x86_64,  runner: macos-latest,          target: x86_64-apple-darwin, cross: true }
           - { name: macos-arm64,   runner: macos-latest,          target: aarch64-apple-darwin }
           - { name: windows-x86_64, runner: windows-latest,   target: x64 }
