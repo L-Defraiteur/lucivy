@@ -267,6 +267,18 @@ pub struct QueryConfig {
     pub min_word_length: Option<usize>,
     pub max_word_length: Option<usize>,
     pub boost_factor: Option<f32>,
+    /// The keys of the JSON that this struct does not know (`boost`,
+    /// `offset`, `slop`, a typo…). They have no effect on the search; they are
+    /// kept so that `query_warnings` can name them instead of letting the
+    /// caller believe they were applied (ticket of 7 November 2026).
+    #[serde(flatten)]
+    pub unknown_keys: std::collections::BTreeMap<String, serde_json::Value>,
+    /// Internal: this leaf is already one of the two apostrophe forms of its
+    /// value (see `apostrophe_forms`), and is not split again. Never read
+    /// from JSON.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub apostrophe_form: bool,
 }
 
 // ─── Field Resolution ───────────────────────────────────────────────────────
@@ -472,6 +484,22 @@ pub fn build_query(
 /// In regex mode (`regex: true`), uses RegexContinuationQuery for cross-token regex matching.
 /// In fuzzy mode (default), uses SuffixContainsQuery with optional Levenshtein distance.
 /// With `anchor_start=true`, restricts to SI=0 matches (token start = startsWith).
+/// The apostrophes a text may be written with: the straight one, and the
+/// typographic ones (right and left single quotation marks, modifier letter
+/// apostrophe).
+const APOSTROPHES: [char; 4] = ['\'', '\u{2019}', '\u{2018}', '\u{02BC}'];
+
+/// The two forms of a value with an apostrophe — every apostrophe straight,
+/// every apostrophe `’` — or `None` when it has none.
+pub(crate) fn apostrophe_forms(value: &str) -> Option<(String, String)> {
+    if !value.contains(APOSTROPHES) {
+        return None;
+    }
+    let straight: String = value.chars().map(|c| if APOSTROPHES.contains(&c) { '\'' } else { c }).collect();
+    let typographic: String = value.chars().map(|c| if APOSTROPHES.contains(&c) { '\u{2019}' } else { c }).collect();
+    Some((straight, typographic))
+}
+
 fn build_contains_query(
     config: &QueryConfig,
     schema: &Schema,
@@ -480,6 +508,27 @@ fn build_contains_query(
     let is_regex = config.regex.unwrap_or(false);
     if is_regex {
         return build_contains_regex(config, schema, highlight_sink);
+    }
+
+    // A value with an apostrophe is searched under both of its forms: the
+    // straight `'` is a separator, the typographic `’` is content
+    // (`is_content_char`), so a text written with one was not found by the
+    // other, even at distance 1 — `Vue d'ensemble` against `Vue d’ensemble`
+    // (ticket of 7 November 2026). Done at query time, the index is
+    // unchanged and indexes written before keep answering.
+    if !config.apostrophe_form {
+        if let Some((straight, typographic)) = config.value.as_deref().and_then(apostrophe_forms) {
+            let leaf = |value: String| QueryConfig {
+                value: Some(value),
+                apostrophe_form: true,
+                ..config.clone()
+            };
+            let clauses: Vec<(Occur, Box<dyn Query>)> = vec![
+                (Occur::Should, build_contains_query(&leaf(straight), schema, highlight_sink.clone())?),
+                (Occur::Should, build_contains_query(&leaf(typographic), schema, highlight_sink)?),
+            ];
+            return Ok(Box::new(BooleanQuery::new(clauses)));
+        }
     }
 
     let field = resolve_field(config, schema)?;
