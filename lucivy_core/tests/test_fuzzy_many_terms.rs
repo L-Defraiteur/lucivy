@@ -53,13 +53,13 @@ const DOCUMENTS: [&str; 2] = [
     include_str!("../../docs/13-09-2026/09-architecture.md"),
 ];
 
-fn index() -> (ShardedHandle, Vec<String>) {
+fn index(name: &str) -> (ShardedHandle, Vec<String>) {
     let config: SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [{"name": "content", "type": "text", "stored": true}],
         "shards": 4
     }))
     .unwrap();
-    let handle = ShardedHandle::create(&tmp_dir("lucivy_fuzzy_many_terms"), &config).unwrap();
+    let handle = ShardedHandle::create(&tmp_dir(name), &config).unwrap();
     for (i, text) in DOCUMENTS.iter().enumerate() {
         handle
             .add_document_json(i as u64, &serde_json::json!({"content": text}))
@@ -95,7 +95,7 @@ fn time_ms(handle: &ShardedHandle, q: &QueryConfig, highlights: bool) -> (u128, 
 #[test]
 #[ignore = "timing witness: run with --release -- --ignored --nocapture"]
 fn fuzzy_query_cost_is_bounded_in_its_length() {
-    let (handle, words) = index();
+    let (handle, words) = index("lucivy_fuzzy_many_terms_cost");
     assert!(words.len() >= 200, "the page has {} distinct words, 200 are needed", words.len());
     let mut whole_d1_at_200 = 0;
     println!("words  chars  whole d=0  whole d=1  whole d=1+hl  by word d=1+hl   (ms)");
@@ -124,7 +124,7 @@ fn fuzzy_query_cost_is_bounded_in_its_length() {
 /// at distance 1 on four shards: the first document comes back, with a span.
 #[test]
 fn long_fuzzy_query_finds_its_passage() {
-    let (handle, _) = index();
+    let (handle, _) = index("lucivy_fuzzy_many_terms_recall");
     let text = DOCUMENTS[0];
     // A passage of plain prose (ASCII letters and spaces), long enough.
     let start = text.find("Le ").unwrap_or(0);
