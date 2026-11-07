@@ -73,3 +73,47 @@ fn an_exact_passage_is_found_at_every_length_on_four_shards() {
     let missed = missed_lengths(4);
     assert!(missed.is_empty(), "lengths not found (bytes, r relaxed / s strict): {missed:?}");
 }
+
+/// **Recall of the windowed cut at distance 2** (the piece partition of a
+/// query longer than 64 bytes searched near the even split only, from
+/// `composite::piece_cut_positions`). Passages of the first document from 24
+/// to 300 bytes, two letters changed at a third and at two thirds of the
+/// passage, searched whole at distance 2 on four shards, from several starts:
+/// each must come back. Prints the found counts and the time of each length.
+#[test]
+fn a_long_passage_with_two_typos_is_found_at_distance_two() {
+    let handle = index(4);
+    let text = DOCUMENTS[0];
+    let starts: Vec<usize> = ["Le profileur", "La compaction", "Le plafond", "Les vallées"]
+        .iter()
+        .filter_map(|s| text.find(s))
+        .collect();
+    assert!(starts.len() >= 2, "passages: {starts:?}");
+    let mut missed = Vec::new();
+    for len in [24usize, 48, 64, 96, 128, 200, 300] {
+        let mut found = 0;
+        let t0 = std::time::Instant::now();
+        for &start in &starts {
+            let Some(end) = (start + len..text.len()).find(|&i| text.is_char_boundary(i)) else { continue };
+            let mut bytes = text[start..end].as_bytes().to_vec();
+            for at in [bytes.len() / 3, 2 * bytes.len() / 3] {
+                if let Some(i) = (at..bytes.len()).find(|&i| bytes[i].is_ascii_lowercase()) {
+                    bytes[i] = if bytes[i] == b'x' { b'y' } else { b'x' };
+                }
+            }
+            let typo = String::from_utf8(bytes).unwrap();
+            let q: QueryConfig = serde_json::from_value(serde_json::json!({
+                "type": "contains", "field": "content", "value": typo, "distance": 2
+            }))
+            .unwrap();
+            let ids = handle.node_ids_of(&handle.search(&q, 10, None).unwrap()).unwrap();
+            if ids.contains(&0) {
+                found += 1;
+            } else {
+                missed.push(format!("{len}@{start}"));
+            }
+        }
+        eprintln!("d=2 two typos, {len:3} bytes: {found}/{} found, {} ms", starts.len(), t0.elapsed().as_millis());
+    }
+    assert!(missed.is_empty(), "passages with two typos not found at distance 2 (length@start): {missed:?}");
+}
