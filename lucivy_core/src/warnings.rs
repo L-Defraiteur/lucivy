@@ -37,6 +37,23 @@ fn collect(config: &QueryConfig, out: &mut Vec<String>) {
         }
     }
 
+    // Keys the query accepted but does nothing with: say it, the search ran
+    // without them (ticket of 7 November 2026).
+    for key in config.unknown_keys.keys() {
+        out.push(match key.as_str() {
+            "boost" => "`boost` is not supported and was ignored: lucivy has no per-field or per-clause boost — run one search per field and weight the scores yourself".to_string(),
+            "offset" => "`offset` is not supported and was ignored: there is no pagination offset — ask for `offset + n` results and skip the first `offset`".to_string(),
+            "slop" => "`slop` is not supported and was ignored: there is no proximity search — `phrase` and `contains` match the whole value as one substring".to_string(),
+            other => format!("unknown query key `{other}` was ignored"),
+        });
+    }
+    if config.terms.is_some() {
+        out.push("`terms` is not read and was ignored: `phrase` and `contains` search `value`".to_string());
+    }
+    if config.max_expansions.is_some() {
+        out.push("`max_expansions` is not read and was ignored".to_string());
+    }
+
     let value = config.value.as_deref().or(config.pattern.as_deref()).unwrap_or("");
 
     // `fields` (plural) is only read by `parse` and the boolean composites;
