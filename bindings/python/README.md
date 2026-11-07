@@ -1,8 +1,17 @@
-# lucivy 4.3.1
+# lucivy 4.3.2
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. From Python. Runs in your process, in your transaction (bring your own storage), and the same engine runs in the browser. Powered by Rust, MIT.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
+
+### What's new in 4.3.2
+
+A patch release of four search fixes. The index format is unchanged.
+
+- **Long passages are found again.** A `contains` of a sentence copied from a document no longer stops finding it past about 48 bytes.
+- **Long fuzzy queries are fast.** A 200-word text searched at distance 1 takes 96 ms instead of 15.8 s on a sharded index.
+- **Both apostrophes match.** « Vue d'ensemble » finds « Vue d’ensemble » and the other way round, on existing indexes too.
+- **Unknown query keys are reported.** `boost`, `offset`, `slop` or a typo are named by `query_warnings` instead of being ignored silently.
 
 ### What's new in 4.3.1
 
@@ -104,7 +113,7 @@ Where a cell says "not with this analyzer", a purpose-built analyzer or plugin m
 ## Install
 
 ```bash
-pip install lucivy  # 4.3.1
+pip install lucivy  # 4.3.2
 ```
 
 ## Quick start

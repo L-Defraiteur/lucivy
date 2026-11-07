@@ -1,8 +1,17 @@
-# lucivy-wasm 4.3.1
+# lucivy-wasm 4.3.2
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. In the browser — the same engine as the native bindings, built with emscripten: **threads** (pthreads over SharedArrayBuffer), OPFS persistence, snapshot import. Runs in a Web Worker. MIT.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — it clones lucivy's own source from GitHub and indexes it in your browser.
+
+### What's new in 4.3.2
+
+A patch release of four search fixes. The index format is unchanged.
+
+- **Long passages are found again.** A `contains` of a sentence copied from a document no longer stops finding it past about 48 bytes.
+- **Long fuzzy queries are fast.** A 200-word text searched at distance 1 takes 96 ms instead of 15.8 s on a sharded index.
+- **Both apostrophes match.** « Vue d'ensemble » finds « Vue d’ensemble » and the other way round, on existing indexes too.
+- **Unknown query keys are reported.** `boost`, `offset`, `slop` or a typo are named by `query_warnings` instead of being ignored silently.
 
 ### What's new in 4.3.1
 
