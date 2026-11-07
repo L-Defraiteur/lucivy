@@ -1,3 +1,41 @@
+Lucivy 4.3.2 — unreleased
+=========================
+
+Fixes only: the index format is unchanged, and indexes written by 4.3.1 or
+earlier answer as before.
+
+- **Fixed: an exact passage of a document stopped being found past 42 to 54
+  bytes.** A `contains` of a sentence copied from a document did not find it,
+  whatever its text, strict or relaxed, on one shard as on four: the chain of
+  chunks that spells the query was cut at eight positions. The chain may now
+  grow to the length of the query (each position consumes at least a byte, so
+  the walk still ends). A 300-byte passage is now found at every length; it
+  was missed from 44 bytes (strict) and 56 (relaxed).
+
+- **Fixed: a long fuzzy query cost in O(n²) of its length.** On a sharded
+  index, the planner of a fuzzy query counted every substring of the query in
+  the dictionary before searching, where only prefixes and suffixes can be used
+  at distance 1. A 200-word text searched whole at distance 1, on two documents
+  and four shards, took 15.8 s; it takes 96 ms (877 ms → 13 ms at 64 words,
+  3.8 s → 39 ms at 128). The planner now prepares only the pieces the search can
+  price. At distance 2 and more, a query longer than 64 bytes looks for its
+  piece cuts within 16 bytes of the even split instead of everywhere: same
+  passages found with two typos (14 of 14, 24 to 300 bytes), 561 → 35 ms at
+  300 bytes.
+
+- **Fixed: a typographic apostrophe did not match a straight one.** The
+  straight `'` is a separator and the typographic `’` content, so
+  « Vue d'ensemble » did not find « Vue d’ensemble », even at distance 1. A
+  value with an apostrophe (`'` `’` `‘` `ʼ`) is now searched under both forms,
+  at query time: existing indexes benefit without a rebuild.
+
+- **Unknown query keys are no longer dropped silently.** `boost`, `offset`,
+  `slop` or a misspelt key were accepted and ignored, and the caller believed
+  them applied. They still have no effect, but `query_warnings` now names each
+  of them (with what to do instead for the first three), as it does for `terms`
+  and `max_expansions`, accepted but never read. Refusing them outright would
+  break a caller that sends one today: that is for a minor version.
+
 Lucivy 4.3.1 — 25 October 2026
 ===============================
 
