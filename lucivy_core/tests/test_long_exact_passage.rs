@@ -23,13 +23,13 @@ fn tmp_dir(name: &str) -> String {
     p.to_str().unwrap().to_string()
 }
 
-fn index(shards: usize) -> ShardedHandle {
+fn index(name: &str, shards: usize) -> ShardedHandle {
     let config: SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [{"name": "content", "type": "text", "stored": true}],
         "shards": shards
     }))
     .unwrap();
-    let handle = ShardedHandle::create(&tmp_dir(&format!("lucivy_long_exact_{shards}")), &config).unwrap();
+    let handle = ShardedHandle::create(&tmp_dir(&format!("{name}_{shards}")), &config).unwrap();
     for (i, text) in DOCUMENTS.iter().enumerate() {
         handle.add_document_json(i as u64, &serde_json::json!({"content": text})).unwrap();
     }
@@ -41,7 +41,7 @@ fn index(shards: usize) -> ShardedHandle {
 /// passage of the first document, strict and relaxed, on `shards` shards:
 /// the lengths at which the document was not found.
 fn missed_lengths(shards: usize) -> Vec<String> {
-    let handle = index(shards);
+    let handle = index("lucivy_long_exact", shards);
     let text = DOCUMENTS[0];
     let start = text.find("Le profileur").expect("the passage");
     let mut missed = Vec::new();
@@ -82,7 +82,7 @@ fn an_exact_passage_is_found_at_every_length_on_four_shards() {
 /// each must come back. Prints the found counts and the time of each length.
 #[test]
 fn a_long_passage_with_two_typos_is_found_at_distance_two() {
-    let handle = index(4);
+    let handle = index("lucivy_two_typos", 4);
     let text = DOCUMENTS[0];
     let starts: Vec<usize> = ["Le profileur", "La compaction", "Le plafond", "Les vallées"]
         .iter()
