@@ -1,21 +1,26 @@
-//! A fuzzy query costs in proportion to its terms (ticket of 7 November 2026,
+//! A fuzzy query costs in proportion to its length (ticket of 7 November 2026,
 //! rag3db `docs/tickets/2026-11-07-une-requete-floue-de-lucivy-coute-en-proportion-de-ses-termes.md`).
 //!
-//! rag3weaver sent long user texts as `contains_split` at distance 1: one fuzzy
-//! `contains` per word, OR'ed. Measured in service: 197 words held the engine
-//! 33 s, against 2 ms for one word, and the cost barely depends on the size of
-//! the index. This witness replays that shape on an index of two documents.
+//! rag3weaver searched a user's whole text as one relaxed `contains` at
+//! distance 1. Measured by its session « recherche » (sonde_requete_longue,
+//! closed product ticket « le plein texte explose sur une requête longue »):
+//! 197 words, 1 397 characters, took 29 s on a base of two documents and 112 s
+//! on 65 946, against 0 to 132 ms at distance 0 — the cost follows the fuzzy
+//! needle, not the index. One fuzzy `contains` per word (`contains_split`)
+//! stays cheap. This witness replays the whole-text shape on two documents of
+//! prose.
 //!
 //! `cargo test --release -p lucivy-core --test test_fuzzy_many_terms -- --ignored --nocapture`
-//! prints the curve (terms → milliseconds, distance 0 and 1) and fails when 200
-//! fuzzy terms take longer than the budget.
+//! prints the curve (words, characters → milliseconds, whole text at distance
+//! 0 and 1, word by word at distance 1) and fails when the 200-word fuzzy
+//! whole text takes longer than the budget.
 
 use std::time::Instant;
 
 use lucivy_core::query::{QueryConfig, SchemaConfig};
 use lucivy_core::sharded_handle::ShardedHandle;
 
-/// 200 fuzzy terms on two documents must answer within this.
+/// A 200-word text searched whole at distance 1, on two documents, must answer within this.
 const BUDGET_MS: u128 = 2_000;
 
 fn tmp_dir(name: &str) -> String {
@@ -25,25 +30,14 @@ fn tmp_dir(name: &str) -> String {
     p.to_str().unwrap().to_string()
 }
 
-/// Distinct words of 5 to 9 letters, deterministic, varied enough not to share
-/// all their trigrams (a user's text, not `word1 word2 …`).
-fn words(n: usize) -> Vec<String> {
-    let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
-    let mut next = || {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        seed
-    };
-    let mut out: Vec<String> = Vec::with_capacity(n);
-    while out.len() < n {
-        let len = 5 + (next() % 5) as usize;
-        let w: String = (0..len).map(|_| (b'a' + (next() % 26) as u8) as char).collect();
-        if !out.contains(&w) {
-            out.push(w);
-        }
-    }
-    out
+/// Prose: the words of lucivy's README, in order (a user's text, not
+/// random letters — the fuzzy path looks its candidates up by trigrams).
+fn prose() -> Vec<String> {
+    include_str!("../../README.md")
+        .split_whitespace()
+        .filter(|w| w.chars().any(|c| c.is_alphanumeric()))
+        .map(|w| w.to_string())
+        .collect()
 }
 
 fn index() -> (ShardedHandle, Vec<String>) {
@@ -53,24 +47,29 @@ fn index() -> (ShardedHandle, Vec<String>) {
     }))
     .unwrap();
     let handle = ShardedHandle::create(&tmp_dir("lucivy_fuzzy_many_terms"), &config).unwrap();
-    // Two documents of a few hundred words each, some of them query words.
-    let vocab = words(400);
-    for (i, half) in vocab.chunks(200).enumerate() {
-        let text = half.iter().step_by(3).cloned().collect::<Vec<_>>().join(" ");
+    // Two documents of prose, the second half of the README: the query (the
+    // first 200 words) shares its vocabulary with them, not its text.
+    let words = prose();
+    let rest = &words[200..];
+    for (i, half) in rest.chunks(rest.len() / 2 + 1).take(2).enumerate() {
         handle
-            .add_document_json(i as u64, &serde_json::json!({"content": text}))
+            .add_document_json(i as u64, &serde_json::json!({"content": half.join(" ")}))
             .unwrap();
     }
     handle.commit().unwrap();
-    (handle, vocab)
+    (handle, words)
 }
 
-fn query(terms: &[String], distance: u8) -> QueryConfig {
+fn whole(terms: &[String], distance: u8) -> QueryConfig {
     serde_json::from_value(serde_json::json!({
-        "type": "contains_split",
-        "field": "content",
-        "value": terms.join(" "),
-        "distance": distance
+        "type": "contains", "field": "content", "value": terms.join(" "), "distance": distance
+    }))
+    .unwrap()
+}
+
+fn word_by_word(terms: &[String], distance: u8) -> QueryConfig {
+    serde_json::from_value(serde_json::json!({
+        "type": "contains_split", "field": "content", "value": terms.join(" "), "distance": distance
     }))
     .unwrap()
 }
@@ -83,21 +82,23 @@ fn time_ms(handle: &ShardedHandle, q: &QueryConfig) -> (u128, usize) {
 
 #[test]
 #[ignore = "timing witness: run with --release -- --ignored --nocapture"]
-fn fuzzy_query_cost_is_bounded_in_its_terms() {
-    let (handle, vocab) = index();
-    let mut d1_at_200 = 0;
-    println!("terms  d=0 ms  d=1 ms  hits(d=1)");
-    for n in [1usize, 10, 25, 50, 100, 150, 200] {
-        let terms = &vocab[..n];
-        let (ms0, _) = time_ms(&handle, &query(terms, 0));
-        let (ms1, hits) = time_ms(&handle, &query(terms, 1));
-        println!("{n:5}  {ms0:6}  {ms1:6}  {hits:5}");
+fn fuzzy_query_cost_is_bounded_in_its_length() {
+    let (handle, words) = index();
+    let mut whole_d1_at_200 = 0;
+    println!("words  chars  whole d=0 ms  whole d=1 ms  by word d=1 ms");
+    for n in [1usize, 4, 8, 16, 32, 64, 128, 200] {
+        let terms = &words[..n];
+        let chars = terms.join(" ").chars().count();
+        let (w0, _) = time_ms(&handle, &whole(terms, 0));
+        let (w1, _) = time_ms(&handle, &whole(terms, 1));
+        let (s1, _) = time_ms(&handle, &word_by_word(terms, 1));
+        println!("{n:5}  {chars:5}  {w0:12}  {w1:12}  {s1:14}");
         if n == 200 {
-            d1_at_200 = ms1;
+            whole_d1_at_200 = w1;
         }
     }
     assert!(
-        d1_at_200 <= BUDGET_MS,
-        "200 fuzzy terms on two documents took {d1_at_200} ms (budget {BUDGET_MS} ms)"
+        whole_d1_at_200 <= BUDGET_MS,
+        "a 200-word text searched whole at distance 1 on two documents took {whole_d1_at_200} ms (budget {BUDGET_MS} ms)"
     );
 }
