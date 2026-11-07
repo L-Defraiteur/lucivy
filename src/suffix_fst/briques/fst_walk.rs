@@ -931,7 +931,15 @@ fn overlap_lookahead<D: AsRef<[u8]>, F>(
 
 // ─── Chain builders ──────────────────────────────────────────────────────
 
-const MAX_CHAIN_DEPTH: usize = 8;
+/// How many positions a chain may grow to: one per byte of the query, at
+/// most — every position consumes at least one byte of the remainder, so a
+/// chain that spells the query never needs more, and the walk still ends.
+/// It was a fixed 8: a passage of a document stopped being found past 42 to
+/// 54 bytes (eight tokens or chunks of prose), whatever its text, strict or
+/// relaxed (ticket of 7 November 2026, `test_long_exact_passage`).
+fn max_chain_depth(query: &str) -> usize {
+    query.len().max(1)
+}
 
 /// A swallowed remainder up to this many bytes becomes a prefix alternative
 /// without counting its candidates first (see `build_chains_from_splits`).
@@ -960,6 +968,7 @@ fn build_chains_from_splits(
 ) -> Vec<TokenChainV3> {
     let mut chains = Vec::new();
     let query_lower = query.to_lowercase();
+    let max_depth = max_chain_depth(&query_lower);
 
     // Every remainder this loop ever walks is a suffix of `query_lower`: the
     // first one is `query_lower[safe_start..]`, and each step only trims from
@@ -1013,7 +1022,7 @@ fn build_chains_from_splits(
                 });
                 continue;
             }
-            if depth >= MAX_CHAIN_DEPTH { continue; }
+            if depth >= max_depth { continue; }
             let rem = &query_lower[rem_off..];
 
             super::profile::bump(|c| &c.n_bcfs_fst_reqs, 1);
@@ -1242,6 +1251,7 @@ pub fn sibling_chain_dfs(
     trace_id: Option<u64>,
 ) -> Vec<TokenChainV3> {
     let query_lower = query.to_lowercase();
+    let max_depth = max_chain_depth(&query_lower);
     let mut chains = Vec::new();
 
     for split in splits {
@@ -1276,7 +1286,7 @@ pub fn sibling_chain_dfs(
         ];
 
         while let Some((cur_ord, rem, chain, depth)) = stack.pop() {
-            if depth >= MAX_CHAIN_DEPTH { continue; }
+            if depth >= max_depth { continue; }
 
             super::profile::bump(|c| &c.n_sib_steps, 1);
             let _t = super::profile::Timer::start();
