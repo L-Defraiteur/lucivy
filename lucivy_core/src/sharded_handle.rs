@@ -3139,6 +3139,19 @@ impl ShardedHandle {
     pub fn close(&self) -> Result<(), String> {
         self.drain_pipeline();
 
+        // Every write is attempted and the first error kept: the pools below
+        // are stopped whatever happens (ticket of 8 November 2026). Leaving on
+        // the first error left the actors on the global scheduler until the
+        // process ended, each holding its shard and the storage behind it —
+        // on a dead path when the index folder was gone, and rag3weaver's e2e
+        // suites died at exit.
+        let mut first_error: Option<String> = None;
+        let mut keep = |e: String| {
+            if first_error.is_none() {
+                first_error = Some(e);
+            }
+        };
+
         // A served snapshot has nothing to commit and nowhere to persist:
         // its bytes are immutable. Committing into it wrote `meta.json` into
         // a read-only directory and failed the close of every snapshot.
@@ -3149,21 +3162,27 @@ impl ShardedHandle {
                 "close_shard",
             );
             for (i, result) in results.into_iter().enumerate() {
-                result.map_err(|e| format!("close shard_{i}: {e}"))?;
+                if let Err(e) = result {
+                    keep(format!("close shard_{i}: {e}"));
+                }
             }
 
             // Persist router state.
-            {
-                let router = self.router.lock().map_err(|_| "router lock poisoned")?;
-                let stats_bytes = router.to_bytes();
-                self.storage.write_root_file(SHARD_STATS_FILE, &stats_bytes)?;
+            match self.router.lock() {
+                Ok(router) => {
+                    let stats_bytes = router.to_bytes();
+                    if let Err(e) = self.storage.write_root_file(SHARD_STATS_FILE, &stats_bytes) {
+                        keep(e);
+                    }
+                }
+                Err(_) => keep("router lock poisoned".to_string()),
             }
 
             // Release writer locks (commit + drain merges per shard).
             for (i, shard) in self.shards.iter().enumerate() {
-                shard
-                    .close()
-                    .map_err(|e| format!("close shard_{i}: {e}"))?;
+                if let Err(e) = shard.close() {
+                    keep(format!("close shard_{i}: {e}"));
+                }
             }
         }
 
@@ -3172,13 +3191,19 @@ impl ShardedHandle {
         // meant "idle", and nothing PROVED no late task could still reach a
         // store whose backing (a database connection on the other side of an
         // FFI) the caller is about to free. After close() the handle is
-        // inert: nothing lucivy holds can touch the storage again.
+        // inert, whether the writes above succeeded or not: nothing lucivy
+        // holds can touch the storage again.
         self.reader_pool.shutdown("close_readers");
-        self.router_ref.send(luciole::ShutdownMsg(luciole::reply::<()>().0).into())
-            .map_err(|_| "router actor channel closed".to_string())?;
+        let (router_stopped, router_rx) = luciole::reply::<()>();
+        if self.router_ref.send(luciole::ShutdownMsg(router_stopped).into()).is_ok() {
+            let _ = global_scheduler().try_wait(router_rx, "close_router");
+        }
         self.shard_pool.shutdown("close_shards");
         self.closed.store(true, Ordering::Release);
-        Ok(())
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     /// Delete a document by its _node_id via shard actors.
@@ -3556,7 +3581,16 @@ mod tests {
             doc.add_text(body, &format!("document {i}, never committed"));
             handle.add_document(doc, i).unwrap();
         }
-        std::fs::remove_dir_all(&dir).unwrap();
+        // The indexers may still be writing into the folder: retry its removal.
+        let mut removed = Err(std::io::Error::other("not tried"));
+        for _ in 0..100 {
+            removed = std::fs::remove_dir_all(&dir);
+            if removed.is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        removed.unwrap();
         let err = handle.close().expect_err("the index folder is gone: the close must fail");
         assert!(!err.is_empty(), "the error says what failed");
         for (i, shard) in handle.shards.iter().enumerate() {
