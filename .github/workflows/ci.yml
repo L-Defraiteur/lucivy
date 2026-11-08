@@ -86,7 +86,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: core
+      # No kernel corpus and no rag3db clone here: the corpus tests take their
+      # synthetic corpus or skip, and say so. Without this variable a missing
+      # corpus fails the test; the ground-truth job below carries its corpus.
       - name: lucivy-core
+        env:
+          LUCIVY_CORPUS_ABSENT_OK: "1"
         run: cargo test -p lucivy-core --no-fail-fast
       - name: lucivy-cpp
         run: cargo test -p lucivy-cpp

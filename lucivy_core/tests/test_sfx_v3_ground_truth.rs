@@ -11,6 +11,8 @@
 //! Run: cargo test -p lucivy-core --test test_sfx_v3_ground_truth -- --nocapture
 //! Output: /tmp/v3_ground_truth_report.txt
 
+mod common;
+
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
@@ -93,9 +95,9 @@ fn collect_files(max_docs_arg: usize) -> Vec<(String, String)> {
     let root = std::path::Path::new(&root_owned);
     let max_docs = max_docs(max_docs_arg);
     if !root.exists() {
-        eprintln!("Skipping: corpus not found at {root_owned}");
-        eprintln!("  git clone --depth=1 https://github.com/L-Defraiteur/rag3db.git {DEFAULT_REPO_PATH}");
-        eprintln!("  or set V3_CORPUS=/path/to/another/tree");
+        // Missing: red with the recipe, or a skip said as such when allowed
+        // (the CI's core job; the ground-truth job carries its corpus).
+        common::usable(&root_owned, 0, 1, "skipped, nothing is checked");
         return vec![];
     }
     let exclude_dirs = ["target", "node_modules", ".git", "build", "__pycache__", "playground"];
