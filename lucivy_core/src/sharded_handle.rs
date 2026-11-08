@@ -3536,6 +3536,39 @@ mod tests {
         assert_eq!(handle.num_docs(), 2001, "document 7 must be there once, next to the 2 000 fillers");
     }
 
+    /// **A close that fails still stops its pools** (ticket of 8 November
+    /// 2026, read by rag3db while mapping a SIGSEGV at the end of its e2e
+    /// suites). `close()` left on the first write that failed — here the
+    /// commit, the index folder being gone — before stopping its pools: the
+    /// shard actors stayed on the global scheduler until the process ended,
+    /// each holding its shard and the storage behind it, on a dead path. The
+    /// close must fail, say what failed, and still leave no actor holding a
+    /// shard, and the handle closed.
+    #[test]
+    fn a_failed_close_still_stops_its_pools() {
+        let dir = tmp_dir("lucivy_close_folder_gone");
+        let handle = ShardedHandle::create(&dir, &make_config(2)).unwrap();
+        let body = handle.field("body").unwrap();
+        let nid = handle.field(NODE_ID_FIELD).unwrap();
+        for i in 0..20u64 {
+            let mut doc = LucivyDocument::new();
+            doc.add_u64(nid, i);
+            doc.add_text(body, &format!("document {i}, never committed"));
+            handle.add_document(doc, i).unwrap();
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+        let err = handle.close().expect_err("the index folder is gone: the close must fail");
+        assert!(!err.is_empty(), "the error says what failed");
+        for (i, shard) in handle.shards.iter().enumerate() {
+            assert_eq!(
+                Arc::strong_count(shard),
+                1,
+                "shard_{i} is still held by an actor after the failed close ({err})"
+            );
+        }
+        assert!(handle.closed.load(Ordering::Acquire), "a failed close leaves the handle closed ({err})");
+    }
+
     /// **Dropping the handle commits what was queued** (4.3.1). The drop
     /// closed the shards directly: a document whose `Insert` the shard actor
     /// had already applied was committed, one still in its mailbox was lost,
