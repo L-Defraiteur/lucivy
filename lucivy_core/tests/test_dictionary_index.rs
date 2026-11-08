@@ -4,6 +4,8 @@
 //! reopened index answers the same; and the files are what the design
 //! says — no `.sfx` / `.termtexts` per segment, one generation per field.
 
+mod common;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -37,7 +39,7 @@ fn corpus(max: usize) -> Vec<(String, String)> {
     if root.exists() {
         walk(root, &mut files, max);
     }
-    if files.len() < 50 {
+    if !common::usable("/tmp/lucivy-cmp", files.len(), 50, "a synthetic corpus") {
         // Synthetic fallback: a vocabulary the kernel panel would find.
         let vocab = ["mutex_lock", "mutex_unlock", "spin_lock_irqsave", "sched_setscheduler", "printk", "schedule",
                      "register_device", "kmalloc(sizeof(*p), GFP_KERNEL)", "return -EINVAL;", "if (!ptr)", "struct file *f"];

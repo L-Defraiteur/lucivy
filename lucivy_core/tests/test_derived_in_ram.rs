@@ -5,6 +5,8 @@
 //! answers the same; and the files are what the option says: none of the
 //! three on disk, the setting in `meta.json`.
 
+mod common;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -38,7 +40,7 @@ fn corpus(max: usize) -> Vec<(String, String)> {
     if root.exists() {
         walk(root, &mut files, max);
     }
-    if files.len() < 50 {
+    if !common::usable("/tmp/lucivy-cmp", files.len(), 50, "a synthetic corpus") {
         let vocab = ["mutex_lock", "mutex_unlock", "spin_lock_irqsave", "sched_setscheduler", "printk", "schedule",
                      "register_device", "kmalloc(sizeof(*p), GFP_KERNEL)", "return -EINVAL;", "if (!ptr)", "struct file *f",
                      "可以理可以理可以理解。", "déjà vu"];
