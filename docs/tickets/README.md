@@ -10,3 +10,4 @@ le corrige.
 | [2026-11-07-apostrophe-typographique](2026-11-07-apostrophe-typographique.md) | ouvert |
 | [2026-11-07-cles-de-requete-ignorees](2026-11-07-cles-de-requete-ignorees.md) | ouvert |
 | [2026-11-07-un-passage-exact-long-n-est-plus-trouve](2026-11-07-un-passage-exact-long-n-est-plus-trouve.md) | ouvert |
+| [2026-11-08-un-test-de-corpus-sans-son-corpus-passe-vert](2026-11-08-un-test-de-corpus-sans-son-corpus-passe-vert.md) | ouvert |
