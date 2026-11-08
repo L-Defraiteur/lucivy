@@ -3593,11 +3593,20 @@ mod tests {
         removed.unwrap();
         let err = handle.close().expect_err("the index folder is gone: the close must fail");
         assert!(!err.is_empty(), "the error says what failed");
+        // An actor acknowledges its Shutdown, then the scheduler drops it:
+        // give the last one a moment. Before the fix they lived on until the
+        // process ended.
+        let t0 = std::time::Instant::now();
+        while handle.shards.iter().any(|s| Arc::strong_count(s) > 1)
+            && t0.elapsed() < std::time::Duration::from_secs(2)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         for (i, shard) in handle.shards.iter().enumerate() {
             assert_eq!(
                 Arc::strong_count(shard),
                 1,
-                "shard_{i} is still held by an actor after the failed close ({err})"
+                "shard_{i} is still held by an actor 2 s after the failed close ({err})"
             );
         }
         assert!(handle.closed.load(Ordering::Acquire), "a failed close leaves the handle closed ({err})");
