@@ -1,8 +1,14 @@
-# lucivy 4.3.2
+# lucivy 4.3.3
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. From Node.js. Runs in your process, in your transaction (bring your own storage), and the same engine runs in the browser. Powered by Rust via napi-rs, MIT.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
+
+### What's new in 4.3.3
+
+A patch release with one fix. The index format is unchanged.
+
+- **A failed `close()` still stops the index.** When closing failed (for example because the index directory had been deleted), `close()` returned the error before stopping its thread pools, and their actors kept the shards and their storage until the process ended. `close()` now attempts every write, stops and joins its pools whatever happens, then returns the first error; a handle whose close failed is closed like any other.
 
 ### What's new in 4.3.2
 
@@ -108,7 +114,7 @@ Still there from 2.x: SFX-only engine, distributed search (`exportStats` / `merg
 ## Install
 
 ```bash
-npm install lucivy   # 4.3.2
+npm install lucivy   # 4.3.3
 ```
 
 ## Quick start

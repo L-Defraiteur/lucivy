@@ -1,3 +1,27 @@
+Lucivy 4.3.3 — 11 November 2026
+================================
+
+One fix: the index format is unchanged, and indexes written by 4.3.2 or
+earlier answer as before.
+
+- **Fixed: a failed `close()` left the index running.** `ShardedHandle::close()`
+  returned on the first write that failed (committing the shards, saving the
+  router state, closing the shards), before shutting down its thread pools: the
+  shard actors stayed on the global scheduler until the process ended, each
+  holding its shard and the storage behind it. This happened when the index
+  directory had been deleted under a live index, and a host process could crash
+  at exit. `close()` now attempts every write, keeps the first error, shuts down
+  and joins the reader pool, the router (whose `Shutdown` is now awaited instead
+  of fire-and-forget) and the shard pool, marks the handle closed, and only then
+  returns the error. A handle whose close failed is as inert as one closed
+  successfully.
+
+- **Tests: a corpus test without its corpus is red.** The ground-truth and
+  parity tests that read the Linux kernel corpus passed green when it was
+  missing; they now fail with the path, the file count found and the recipe to
+  rebuild it. `LUCIVY_CORPUS_ABSENT_OK=1` allows the absence by name (the CI
+  sets it). No change to the library.
+
 Lucivy 4.3.2 — 7 November 2026
 ===============================
 

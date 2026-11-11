@@ -1,4 +1,4 @@
-# lucivy 4.3.2
+# lucivy 4.3.3
 
 [![PyPI](https://img.shields.io/pypi/v/lucivy?label=PyPI&color=blue)](https://pypi.org/project/lucivy/)
 [![npm](https://img.shields.io/npm/v/lucivy?label=npm&color=cb3837)](https://www.npmjs.com/package/lucivy)
@@ -30,6 +30,12 @@ lucivy's own source from GitHub and indexes it in your browser in a few seconds.
 tab. The second half is typed by hand — `index postgres`, then `--strict
 "heap_insert"`, `"CREATE INDEX CONCURRENTLY"` (27 hits, 11 ms), `--fuzzy 1
 "vaccum"` (17 ms) and `--regex "ExecInit[A-Z][a-zA-Z]+\("` (20 ms).*
+
+### What's new in 4.3.3
+
+A patch release with one fix. The index format is unchanged.
+
+- **A failed `close()` still stops the index.** When closing failed (for example because the index directory had been deleted), `close()` returned the error before stopping its thread pools, and their actors kept the shards and their storage until the process ended. `close()` now attempts every write, stops and joins its pools whatever happens, then returns the first error; a handle whose close failed is closed like any other.
 
 ### What's new in 4.3.2
 
@@ -163,7 +169,7 @@ A patch release that fixes concurrency between searches and writes. The index fo
   3.0.x does not open a 4.0 index; the first commit in 4.0 converts without
   return.
 - One version number for the whole workspace: `ld-lucivy`, `lucivy-core`,
-  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.3.2.
+  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.3.3.
 
 3.0.x brought SFX v3 (exact byte spans on every query mode), boolean syntax,
 Jaro-Winkler, query warnings, bring-your-own-storage in every binding, snapshots
