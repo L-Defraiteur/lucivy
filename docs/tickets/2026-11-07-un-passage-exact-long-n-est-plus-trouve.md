@@ -3,6 +3,8 @@
 *Ouvert le 7 novembre 2026 par la session lucivy, trouvé en mesurant le ticket du flou sans borne.
 Antérieur à ce chantier : présent sur `main` (`fd3fe74`, 4.3.1).*
 
+**État** : **corrigé** dans lucivy 4.3.2 : la profondeur d'une chaîne de morceaux est bornée par la longueur de la requête au lieu de 8 positions (`max_chain_depth`, `src/suffix_fst/briques/fst_walk.rs`) ; témoin `test_long_exact_passage` (un passage de 300 octets trouvé à toute longueur, strict et relâché, sur 1 et 4 shards ; raté avant dès 44 octets en strict et 56 en relâché).
+
 ## Ce qui se passe
 
 Un `contains` dont la valeur est un passage copié d'un document ne le trouve plus au-delà d'une
