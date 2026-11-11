@@ -3,6 +3,8 @@
 *Ouvert le 7 novembre 2026, à la demande de Lucie. Relevé le 25 octobre sur lucivy 4.3.1
 (`docs/25-10-2026/03-options-de-recherche.md`, § 1 et § 2, branche `docs-pipeline-publication`).*
 
+**État** : **corrigé à la requête** dans lucivy 4.3.2 (publiée le 7 novembre 2026) : une valeur qui porte `'`, `’`, `‘` ou `ʼ` est cherchée sous sa forme droite et sous sa forme `’` (`apostrophe_forms`, `lucivy_core/src/query.rs`), sans toucher l'index ; témoin `both_apostrophes_find_each_other`. **Reste ouvert** : normaliser aussi à l'indexation (change le format des index), une décision de Lucie.
+
 ## Ce qui se passe
 
 Une requête « Vue d'ensemble » (apostrophe droite, U+0027) ne trouve pas un texte « Vue d’ensemble »

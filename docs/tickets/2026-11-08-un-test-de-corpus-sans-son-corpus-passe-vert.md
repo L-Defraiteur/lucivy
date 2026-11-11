@@ -2,6 +2,8 @@
 
 *Ouvert le 8 novembre 2026, à la demande de c7, après l'effacement de `~/lucivy_bench` à luciepc.*
 
+**État** : **corrigé** par la PR #22 (branche `4.3.2.1-corpus-absent`, `b98a731`, CI verte), **pas encore fusionnée** : la fusion dans `main` attend le mot de Lucie. Un corpus manquant fait échouer le test en nommant la recette ; `LUCIVY_CORPUS_ABSENT_OK=1` permet l'absence par son nom ; témoin `test_missing_corpus`.
+
 ## Ce qui se passe
 
 Les tests de vérité terrain et de parité de lucivy lisent un corpus réel (le noyau Linux sous

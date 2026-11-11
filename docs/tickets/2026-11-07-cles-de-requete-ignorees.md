@@ -3,6 +3,8 @@
 *Ouvert le 7 novembre 2026, à la demande de Lucie. Relevé le 25 octobre sur lucivy 4.3.1
 (`docs/25-10-2026/03-options-de-recherche.md`, § 3, branche `docs-pipeline-publication`).*
 
+**État** : **corrigé par un avertissement** dans lucivy 4.3.2 : `QueryConfig` recueille les clés inconnues (`unknown_keys`) et `query_warnings` les nomme, avec ce qu'il faut faire pour `boost`, `offset` et `slop`, et dit `terms` et `max_expansions` acceptés sans effet ; témoin `unknown_query_keys_are_named_by_the_warnings`. **Reste ouvert** : les refuser par une erreur (incompatible, donc une 4.4.0), une décision de Lucie.
+
 ## Ce qui se passe
 
 `QueryConfig` (`lucivy_core/src/query.rs:223-270`) se désérialise sans `deny_unknown_fields`

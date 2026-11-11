@@ -3,6 +3,8 @@
 *Ouvert le 8 novembre 2026, à la demande de c7 : lu par la session « recherche » de rag3db en
 cartographiant un SIGSEGV à la sortie des e2e de rag3weaver.*
 
+**État** : **corrigé** par la PR #23 (branche `4.3.2.2-close-arrete-ses-pools`, `c040e0f`, CI verte), **pas encore fusionnée** : la fusion dans `main` attend le mot de Lucie. `close()` tente chaque écriture, arrête et attend ses acteurs, puis rend la première erreur ; témoin `a_failed_close_still_stops_its_pools`.
+
 ## Ce qui se passe
 
 `close()` (`lucivy_core/src/sharded_handle.rs`) enchaîne trois écritures — le commit de chaque
