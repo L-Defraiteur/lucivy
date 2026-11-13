@@ -583,6 +583,7 @@ mod tests {
         impl Actor for DropWorker {
             type Msg = ShutdownMsg;
             fn name(&self) -> &'static str { "shutdown_drop_gate" }
+            fn priority(&self) -> Priority { Priority::Medium }
             fn handle(&mut self, msg: ShutdownMsg, _ctx: &crate::scheduler::ActorContext) -> ActorStatus {
                 msg.ack();
                 ActorStatus::Stop
