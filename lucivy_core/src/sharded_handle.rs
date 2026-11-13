@@ -3572,6 +3572,60 @@ mod tests {
     /// each holding its shard and the storage behind it, on a dead path. The
     /// close must fail, say what failed, and still leave no actor holding a
     /// shard, and the handle closed.
+    /// The close barrier must release router/shard ownership at its return,
+    /// on both success and a deterministic root write failure. RAM only.
+    fn close_releases_actors_at_return(fail_write: bool) {
+        struct RootFailure {
+            ram: RamShardStorage,
+            fail: Arc<AtomicBool>,
+        }
+        impl ShardStorage for RootFailure {
+            fn create_shard_handle(&self, id: usize, config: &SchemaConfig) -> Result<LucivyHandle, String> {
+                self.ram.create_shard_handle(id, config)
+            }
+            fn open_shard_handle(&self, id: usize) -> Result<LucivyHandle, String> {
+                self.ram.open_shard_handle(id)
+            }
+            fn write_root_file(&self, name: &str, data: &[u8]) -> Result<(), String> {
+                if self.fail.load(Ordering::Acquire) { return Err("injected root write failure".into()); }
+                self.ram.write_root_file(name, data)
+            }
+            fn read_root_file(&self, name: &str) -> Result<Vec<u8>, String> { self.ram.read_root_file(name) }
+            fn root_file_exists(&self, name: &str) -> bool { self.ram.root_file_exists(name) }
+        }
+        let fail = Arc::new(AtomicBool::new(false));
+        let storage = Box::new(RootFailure { ram: RamShardStorage::new(), fail: fail.clone() });
+        let handle = ShardedHandle::create_with_storage(storage, &make_config(2)).unwrap();
+        let body = handle.field("body").unwrap();
+        let nid = handle.field(NODE_ID_FIELD).unwrap();
+        for i in 0..20u64 {
+            let mut doc = LucivyDocument::new();
+            doc.add_u64(nid, i);
+            doc.add_text(body, "pending RAM document");
+            handle.add_document(doc, i).unwrap();
+        }
+        fail.store(fail_write, Ordering::Release);
+        let result = handle.close();
+        if fail_write { assert!(result.unwrap_err().contains("injected root write failure")); }
+        else { result.unwrap(); }
+        // No retry, sleep, Arc clone or grace interval at this boundary.
+        assert_eq!(Arc::strong_count(&handle.router), 1, "router still owned after close");
+        for shard in &handle.shards {
+            assert_eq!(Arc::strong_count(shard), 1, "shard still owned after close");
+        }
+        assert!(handle.closed.load(Ordering::Acquire));
+        let mut doc = LucivyDocument::new();
+        doc.add_u64(nid, 100);
+        doc.add_text(body, "must be rejected");
+        assert!(handle.add_document(doc, 100).is_err());
+    }
+
+    #[test]
+    fn successful_close_releases_router_and_shards_at_return() { close_releases_actors_at_return(false); }
+
+    #[test]
+    fn failed_close_releases_router_and_shards_at_return() { close_releases_actors_at_return(true); }
+
     #[test]
     fn a_failed_close_still_stops_its_pools() {
         let dir = tmp_dir("lucivy_close_folder_gone");
