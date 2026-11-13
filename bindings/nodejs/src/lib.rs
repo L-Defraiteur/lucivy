@@ -324,11 +324,9 @@ impl Index {
     /// be rebuilt (its documents added again to a new index); `summary` says it
     /// in plain words.
     ///
-    /// Returns `{concerned, segments, unknown, needsRebuild, summary, fields:
-    /// [{field, referenced, unknown}]}` (`field` is `shard_<n>/<name>`).
-    #[napi(ts_return_type = "{ concerned: boolean, segments: number, unknown: number, needsRebuild: boolean, summary: string, fields: Array<{ field: string, referenced: number, unknown: number }> }")]
-    pub fn check_dictionary(&self) -> Result<serde_json::Value> {
-        check_dictionary_json(self.h()?).map_err(|e| Error::from_reason(e))
+    #[napi]
+    pub fn check_dictionary(&self) -> Result<DictionaryCheck> {
+        check_dictionary_js(self.h()?)
     }
 
     /// @param options - `{limit?: number, highlights?: boolean, fields?: boolean, allowedIds?: number[]}`
@@ -1654,9 +1652,9 @@ impl BlobIndex {
     }
 
     /// Words the shard dictionary lost before lucivy 4.3.5. See `Index.checkDictionary()`.
-    #[napi(ts_return_type = "Promise<{ concerned: boolean, segments: number, unknown: number, needsRebuild: boolean, summary: string, fields: Array<{ field: string, referenced: number, unknown: number }> }>")]
-    pub fn check_dictionary(&self) -> AsyncTask<BlobTask<serde_json::Value>> {
-        self.run(|h, _| check_dictionary_json(h).map_err(|e| Error::from_reason(e)))
+    #[napi(ts_return_type = "Promise<DictionaryCheck>")]
+    pub fn check_dictionary(&self) -> AsyncTask<BlobTask<DictionaryCheck>> {
+        self.run(|h, _| check_dictionary_js(h))
     }
 
     /// Number of documents across all shards.
@@ -1778,17 +1776,42 @@ mod tests {
     }
 }
 
-/// `ShardedHandle::check_dictionary` as a plain JS object.
-fn check_dictionary_json(h: &ShardedHandle) -> std::result::Result<serde_json::Value, String> {
-    let check = h.check_dictionary()?;
-    Ok(serde_json::json!({
-        "concerned": check.concerned,
-        "segments": check.segments,
-        "unknown": check.unknown(),
-        "needsRebuild": check.needs_rebuild(),
-        "summary": check.summary(),
-        "fields": check.fields.iter().map(|f| serde_json::json!({
-            "field": f.field, "referenced": f.referenced, "unknown": f.unknown,
-        })).collect::<Vec<_>>(),
-    }))
+/// One text field of `DictionaryCheck` (per shard: `shard_<n>/<name>`).
+#[napi(object)]
+pub struct DictionaryFieldCheck {
+    pub field: String,
+    /// Word ids referenced by the segments.
+    pub referenced: i64,
+    /// Of those, the ids the dictionary no longer knows: words lost.
+    pub unknown: i64,
+}
+
+/// The result of `checkDictionary()`.
+#[napi(object)]
+pub struct DictionaryCheck {
+    /// False when the index has no shard dictionary: it cannot have lost words this way.
+    pub concerned: bool,
+    pub segments: u32,
+    /// Word ids lost, all fields together.
+    pub unknown: i64,
+    /// True when the index must be rebuilt (its documents added again to a new index).
+    pub needs_rebuild: bool,
+    /// What the check found and what to do, in plain words.
+    pub summary: String,
+    pub fields: Vec<DictionaryFieldCheck>,
+}
+
+/// `ShardedHandle::check_dictionary` for JS.
+fn check_dictionary_js(h: &ShardedHandle) -> Result<DictionaryCheck> {
+    let check = h.check_dictionary().map_err(|e| Error::from_reason(e))?;
+    Ok(DictionaryCheck {
+        concerned: check.concerned,
+        segments: check.segments as u32,
+        unknown: check.unknown() as i64,
+        needs_rebuild: check.needs_rebuild(),
+        summary: check.summary(),
+        fields: check.fields.iter().map(|f| DictionaryFieldCheck {
+            field: f.field.clone(), referenced: f.referenced as i64, unknown: f.unknown as i64,
+        }).collect(),
+    })
 }
