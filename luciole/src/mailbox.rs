@@ -72,19 +72,29 @@ pub struct Mailbox<M> {
 impl<M> Drop for Mailbox<M> {
     fn drop(&mut self) {
         let completion = &self._completion.0;
+        let already_unwinding = std::thread::panicking();
+        let mut first_panic = None;
+        let mut discard = |messages: Vec<M>| {
+            for message in messages {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(message)));
+                if let Err(payload) = result {
+                    if first_panic.is_none() { first_panic = Some(payload); }
+                }
+            }
+        };
         completion.sends.lock().unwrap().closing = true;
         loop {
             // Free bounded-channel slots so sends admitted before closing can
             // finish. Drop messages outside our locks: their destructors may
             // send to other actors (or attempt a now-rejected send to this one).
             let pending: Vec<_> = self.receiver.drain().collect();
-            drop(pending);
+            discard(pending);
             let mut state = completion.sends.lock().unwrap();
             if state.active == 0 {
                 drop(state);
                 // No admitted sender remains and no new sender can enter.
                 let remaining: Vec<_> = self.receiver.drain().collect();
-                drop(remaining);
+                discard(remaining);
                 break;
             }
             if !self.receiver.is_empty() { continue; }
@@ -92,6 +102,13 @@ impl<M> Drop for Mailbox<M> {
             // without sending. Its guard wakes us; no polling or sleep.
             state = completion.sends_changed.wait(state).unwrap();
             drop(state);
+        }
+        drop(discard);
+        // CompletionGuard is dropped during this unwind only AFTER active=0
+        // and an empty queue. Preserve an existing unwind rather than aborting
+        // with a second panic from cleanup.
+        if !already_unwinding {
+            if let Some(payload) = first_panic { std::panic::resume_unwind(payload); }
         }
     }
 }
@@ -341,6 +358,50 @@ mod destruction_tests {
         assert_eq!(Arc::strong_count(&resource), 1);
         assert!(actor_ref.send(resource.clone()).is_err());
         assert!(actor_ref.try_send(resource.clone()).is_err());
+        assert_eq!(Arc::strong_count(&resource), 1);
+    }
+
+    #[test]
+    fn panicking_message_drop_waits_for_admitted_send() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        enum Message { Bomb(mpsc::Sender<()>), Payload(Arc<()>) }
+        impl Drop for Message {
+            fn drop(&mut self) {
+                if let Self::Bomb(entered) = self {
+                    let _ = entered.send(());
+                    panic!("expected queued destructor failure");
+                }
+                if let Self::Payload(resource) = self {
+                    assert!(Arc::strong_count(resource) >= 2);
+                }
+            }
+        }
+        let (mailbox, actor_ref) = mailbox(1);
+        let resource = Arc::new(());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        assert!(actor_ref.send(Message::Bomb(entered_tx)).is_ok());
+        let admitted = actor_ref.completion.begin_send().unwrap();
+        let payload = Message::Payload(resource.clone());
+        let sender = actor_ref.sender.clone();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let dropping = std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(mailbox)));
+            finished_tx.send(result.is_err()).unwrap();
+        });
+        let entered = entered_rx.recv_timeout(Duration::from_secs(5));
+        let premature = finished_rx.recv_timeout(Duration::from_secs(1));
+        let completed_early = actor_ref.completion.waiters.lock().unwrap().is_none();
+        // Release even when the old implementation completed prematurely.
+        let sent = sender.send(payload);
+        drop(admitted);
+        dropping.join().unwrap();
+        assert!(entered.is_ok());
+        assert!(matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)));
+        assert!(!completed_early, "completion preceded admitted send cleanup");
+        assert!(sent.is_ok());
+        assert!(finished_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        actor_ref.wait_stopped(&crate::Scheduler::new(1), "panic_cleaned").unwrap();
         assert_eq!(Arc::strong_count(&resource), 1);
     }
 
