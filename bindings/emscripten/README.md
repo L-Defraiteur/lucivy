@@ -1,8 +1,15 @@
-# lucivy-wasm 4.3.3
+# lucivy-wasm 4.3.4
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. In the browser — the same engine as the native bindings, built with emscripten: **threads** (pthreads over SharedArrayBuffer), OPFS persistence, snapshot import. Runs in a Web Worker. MIT.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — it clones lucivy's own source from GitHub and indexes it in your browser.
+
+### What's new in 4.3.4
+
+A patch release about closing an index. The index format is unchanged.
+
+- **`close()` returns once the index is really released.** It used to return when its actors had acknowledged the shutdown, slightly before they were destroyed: their shards and storage could still be held for a moment after `close()` returned, so reopening the same index right away could find it busy. `close()` now waits for the destruction of every actor, and of the messages still queued to them.
+- **Stopping a scheduler no longer hangs, even rarely.** A thread pool being shut down could miss its wake-up and never return.
 
 ### What's new in 4.3.3
 
