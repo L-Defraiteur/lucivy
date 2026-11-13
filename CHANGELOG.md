@@ -1,3 +1,19 @@
+Unreleased
+==========
+
+- **New: check an index for words lost before 4.3.5.** `check_dictionary()`
+  (Rust: `LucivyHandle` and `ShardedHandle`; Node.js: `index.checkDictionary()`;
+  Python: `index.check_dictionary()`) counts the word ids the committed
+  segments reference and the shard dictionary no longer knows: the words a
+  merge between two commits could lose before 4.3.5. It says whether the index
+  must be rebuilt (`needs_rebuild` / `needsRebuild`) and why, in plain words
+  (`summary`), with one count per field (and per shard). Read-only: it opens no
+  writer and changes nothing. An index without a shard dictionary (sfx version
+  other than 4) is reported as not concerned. On the index saved when the
+  defect was found it reports 31 862 lost ids in `content` and 480 in `path`;
+  on a healthy index, 0. To rebuild: add the documents again to a new index
+  with 4.3.5 or later.
+
 Lucivy 4.3.5 — 13 November 2026
 ================================
 
