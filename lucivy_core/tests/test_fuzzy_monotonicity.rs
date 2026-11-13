@@ -140,18 +140,42 @@ fn count_docs(handle: &LucivyHandle, query_text: &str, distance: u8) -> usize {
     handle.search(&qconfig, 100_000, None).unwrap().len()
 }
 
-fn collect_doc_addrs(handle: &LucivyHandle, query_text: &str, distance: u8) -> HashSet<(u32, u32)> {
-    let qconfig = make_contains_config(query_text, distance);
-    let results = handle.search(&qconfig, 100_000, None).unwrap();
-    results.iter().map(|(_, addr)| (addr.segment_ord as u32, addr.doc_id)).collect()
+/// A stable key for each hit: the `path` field when the schema has one, else
+/// the first line of the content (unique per document in the synthetic tests).
+/// Resolved with the reader as it stands right after the search: a search may
+/// reload it (dictionary fold), and a `DocAddress` is only meaningful for the
+/// reader it came from — comparing addresses across two searches is not.
+fn doc_keys(handle: &LucivyHandle, results: &[(f32, ld_lucivy::DocAddress)]) -> Vec<String> {
+    let searcher = handle.reader.searcher();
+    let path_field = handle.field("path");
+    let content_field = handle.field("content").unwrap();
+    results.iter().map(|(_, addr)| {
+        let doc: ld_lucivy::LucivyDocument = searcher.doc(*addr).unwrap();
+        let text = |f| doc.get_first(f).map(|v| {
+            let o: ld_lucivy::schema::OwnedValue = v.into();
+            match o { ld_lucivy::schema::OwnedValue::Str(s) => s, _ => String::new() }
+        }).unwrap_or_default();
+        match path_field {
+            Some(f) => text(f),
+            None => text(content_field).lines().next().unwrap_or_default().to_string(),
+        }
+    }).collect()
 }
 
-/// Search and return results ordered by score (highest first).
-/// Returns Vec<(score, segment_ord, doc_id)>.
-fn search_ranked(handle: &LucivyHandle, query_text: &str, distance: u8, limit: usize) -> Vec<(f32, u32, u32)> {
+fn collect_doc_keys(handle: &LucivyHandle, query_text: &str, distance: u8) -> HashSet<String> {
+    let qconfig = make_contains_config(query_text, distance);
+    let results = handle.search(&qconfig, 100_000, None).unwrap();
+    let keys: HashSet<String> = doc_keys(handle, &results).into_iter().collect();
+    assert_eq!(keys.len(), results.len(), "every hit has its own key");
+    keys
+}
+
+/// Search and return results ordered by score (highest first), with their keys.
+fn search_ranked(handle: &LucivyHandle, query_text: &str, distance: u8, limit: usize) -> Vec<(f32, String)> {
     let qconfig = make_contains_config(query_text, distance);
     let results = handle.search(&qconfig, limit, None).unwrap();
-    results.iter().map(|(score, addr)| (*score, addr.segment_ord as u32, addr.doc_id)).collect()
+    let keys = doc_keys(handle, &results);
+    results.iter().zip(keys).map(|((score, _), key)| (*score, key)).collect()
 }
 
 #[test]
@@ -190,8 +214,8 @@ fn test_monotonicity_real_repo() {
 
     let mut any_failure = false;
     for query_text in &queries {
-        let d0 = collect_doc_addrs(&handle, query_text, 0);
-        let d1 = collect_doc_addrs(&handle, query_text, 1);
+        let d0 = collect_doc_keys(&handle, query_text, 0);
+        let d1 = collect_doc_keys(&handle, query_text, 1);
         let missing: Vec<_> = d0.difference(&d1).collect();
 
         let status = if missing.is_empty() { "OK" } else { "FAIL" };
@@ -200,8 +224,8 @@ fn test_monotonicity_real_repo() {
 
         if !missing.is_empty() {
             any_failure = true;
-            for &(seg, doc) in missing.iter().take(5) {
-                eprintln!("    MISSING seg={} doc={}", seg, doc);
+            for path in missing.iter().take(5) {
+                eprintln!("    MISSING {path}");
             }
         }
     }
@@ -211,24 +235,13 @@ fn test_monotonicity_real_repo() {
     // among the top results in d=1 (coverage boost should prioritize them).
     let ranking_queries = vec!["3db_val", "rag3db_value_destroy", "alue_dest", "query_result_is_success"];
     let mut ranking_failures = 0;
-    let searcher = handle.reader.searcher();
-    let content_field = handle.field("content").unwrap();
-    let path_field = handle.field("path").unwrap();
-
-    let get_path = |seg: u32, doc: u32| -> String {
-        let addr = ld_lucivy::DocAddress::new(seg, doc);
-        searcher.doc(addr).ok()
-            .and_then(|d: ld_lucivy::LucivyDocument| {
-                d.get_first(path_field).map(|v| {
-                    let o: ld_lucivy::schema::OwnedValue = v.into();
-                    match o { ld_lucivy::schema::OwnedValue::Str(s) => s, _ => String::new() }
-                })
-            })
-            .unwrap_or_else(|| format!("seg={}/doc={}", seg, doc))
+    // Keys are paths (`doc_keys`); the content comes from the collected files.
+    let content_of = |path: &str| -> &str {
+        files.iter().find(|(p, _)| p == path).map(|(_, c)| c.as_str()).unwrap_or("")
     };
 
     for query_text in &ranking_queries {
-        let d0 = collect_doc_addrs(&handle, query_text, 0);
+        let d0 = collect_doc_keys(&handle, query_text, 0);
         if d0.is_empty() { continue; }
 
         // Get ALL d=1 results (not just top 100)
@@ -236,20 +249,18 @@ fn test_monotonicity_real_repo() {
         if ranked.is_empty() { continue; }
 
         // Build score map for d=1
-        let d1_scores: std::collections::HashMap<(u32, u32), (f32, usize)> = ranked.iter()
+        let d1_scores: std::collections::HashMap<&str, (f32, usize)> = ranked.iter()
             .enumerate()
-            .map(|(rank, &(score, seg, doc))| ((seg, doc), (score, rank)))
+            .map(|(rank, (score, key))| (key.as_str(), (*score, rank)))
             .collect();
 
         // Check: all d=0 docs should appear in the top N results of d=1,
         // where N = 2 * d0.len() (generous margin).
         let top_n = (d0.len() * 2).min(ranked.len());
-        let top_addrs: HashSet<(u32, u32)> = ranked[..top_n].iter()
-            .map(|&(_, seg, doc)| (seg, doc))
-            .collect();
+        let top_keys: HashSet<&str> = ranked[..top_n].iter().map(|(_, key)| key.as_str()).collect();
 
-        let not_in_top: Vec<_> = d0.iter()
-            .filter(|addr| !top_addrs.contains(addr))
+        let not_in_top: Vec<&String> = d0.iter()
+            .filter(|key| !top_keys.contains(key.as_str()))
             .collect();
 
         if not_in_top.is_empty() {
@@ -259,26 +270,14 @@ fn test_monotonicity_real_repo() {
             eprintln!("  [RANK FAIL] \"{}\": {} of {} d=0 docs NOT in top {} (total d=1={})",
                 query_text, not_in_top.len(), d0.len(), top_n, ranked.len());
             // Show top 5 results
-            for &(score, seg, doc) in ranked.iter().take(5) {
-                let is_d0 = d0.contains(&(seg, doc));
-                eprintln!("    top: seg={} doc={} score={:.4} {} | {}", seg, doc, score,
-                    if is_d0 { "← d=0" } else { "" }, get_path(seg, doc));
+            for (score, key) in ranked.iter().take(5) {
+                let is_d0 = d0.contains(key);
+                eprintln!("    top: score={:.4} {} | {}", score, if is_d0 { "← d=0" } else { "" }, key);
             }
             // Show each missing d=0 doc: its rank in d=1, score, and content snippet
             eprintln!("    --- missing d=0 docs in d=1 ---");
-            for &&(seg, doc) in not_in_top.iter().take(3) {
-                let d1_info = d1_scores.get(&(seg, doc));
-                let path = get_path(seg, doc);
-                let doc_addr = ld_lucivy::DocAddress::new(seg, doc);
-                let content: String = searcher.doc(doc_addr).ok()
-                    .and_then(|d: ld_lucivy::LucivyDocument| {
-                        d.get_first(content_field).map(|v| {
-                            let o: ld_lucivy::schema::OwnedValue = v.into();
-                            match o { ld_lucivy::schema::OwnedValue::Str(s) => s, _ => String::new() }
-                        })
-                    })
-                    .unwrap_or_default();
-
+            for path in not_in_top.iter().take(3) {
+                let content = content_of(path);
                 // Find the query text in the content (case-insensitive)
                 let query_lower = query_text.to_lowercase();
                 let content_lower = content.to_lowercase();
@@ -292,12 +291,12 @@ fn test_monotonicity_real_repo() {
                     format!("(query not found in content, len={})", content.len())
                 };
 
-                match d1_info {
+                match d1_scores.get(path.as_str()) {
                     Some(&(score, rank)) => {
-                        eprintln!("    seg={} doc={} rank={} score={:.4} | {} | {}", seg, doc, rank, score, path, snippet);
+                        eprintln!("    rank={} score={:.4} | {} | {}", rank, score, path, snippet);
                     }
                     None => {
-                        eprintln!("    seg={} doc={} NOT IN d=1! | {} | {}", seg, doc, path, snippet);
+                        eprintln!("    NOT IN d=1! | {} | {}", path, snippet);
                     }
                 }
             }
@@ -417,8 +416,8 @@ fn test_fuzzy_sku_catalog() {
         }
 
         // Monotonicity: d=1 ⊇ d=0
-        let d0_addrs = collect_doc_addrs(&handle, sku, 0);
-        let d1_addrs = collect_doc_addrs(&handle, sku, 1);
+        let d0_addrs = collect_doc_keys(&handle, sku, 0);
+        let d1_addrs = collect_doc_keys(&handle, sku, 1);
         let missing: Vec<_> = d0_addrs.difference(&d1_addrs).collect();
         if !missing.is_empty() {
             eprintln!("  [MONO FAIL] SKU \"{}\" d=0={} d=1={} missing={}",
@@ -434,7 +433,7 @@ fn test_fuzzy_sku_catalog() {
             typo_sku[pos] = if typo_sku[pos] == b'X' { b'Y' } else { b'X' };
             let typo_str = String::from_utf8(typo_sku).unwrap();
 
-            let typo_d1 = collect_doc_addrs(&handle, &typo_str, 1);
+            let typo_d1 = collect_doc_keys(&handle, &typo_str, 1);
             // The original d=0 docs should be in the typo d=1 results
             let typo_missing: Vec<_> = d0_addrs.difference(&typo_d1).collect();
             if !typo_missing.is_empty() {
@@ -533,8 +532,8 @@ fn test_fuzzy_long_api_keys() {
         let expected: HashSet<usize> = key_in_docs[key_idx].iter().copied().collect();
         if expected.is_empty() { continue; }
 
-        let d0 = collect_doc_addrs(&handle, key, 0);
-        let d1 = collect_doc_addrs(&handle, key, 1);
+        let d0 = collect_doc_keys(&handle, key, 0);
+        let d1 = collect_doc_keys(&handle, key, 1);
 
         if d0.len() < expected.len() {
             eprintln!("  [EXACT FAIL] key[{}] len={}: found {} expected >= {}",
@@ -561,7 +560,7 @@ fn test_fuzzy_long_api_keys() {
                 typo[pos] = if typo[pos] == b'X' { b'Z' } else { b'X' };
                 let typo_str = String::from_utf8(typo).unwrap();
 
-                let typo_d1 = collect_doc_addrs(&handle, &typo_str, 1);
+                let typo_d1 = collect_doc_keys(&handle, &typo_str, 1);
                 let typo_missing: Vec<_> = d0.difference(&typo_d1).collect();
                 if !typo_missing.is_empty() {
                     eprintln!("  [TYPO FAIL] key[{}] \"{}\" typo \"{}\" d=1: missing {} of {} d=0 docs",

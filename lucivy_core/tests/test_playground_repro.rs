@@ -261,46 +261,63 @@ fn test_playground_repro() {
     }
 
     // === Monotonicity check: d=1 must be a superset of d=0 ===
+    // Compared by path, each result set resolved with the reader as it stands
+    // right after its own search: a search may reload the reader (dictionary
+    // fold), and a DocAddress is only meaningful for the reader it came from.
+    // On a failure, everything needed to tell a search defect from a race
+    // with background work: hit counts, segment layout around each search,
+    // and where the query sits in each missing file.
     eprintln!("\n=== MONOTONICITY CHECK: d=0 ⊆ d=1 ===");
+    let segment_layout = || -> String {
+        handle.reader.searcher().segment_readers().iter()
+            .map(|r| r.num_docs().to_string()).collect::<Vec<_>>().join(",")
+    };
+    let paths_of = |query_text: &str, distance: u8| -> (std::collections::BTreeSet<String>, usize, String, String) {
+        let before = segment_layout();
+        let qconfig = QueryConfig {
+            query_type: "contains".into(),
+            field: Some("content".into()),
+            value: Some(query_text.to_string()),
+            distance: Some(distance),
+            ..Default::default()
+        };
+        let results = handle.search(&qconfig, 100_000, None).unwrap();
+        let after = segment_layout();
+        let searcher = handle.reader.searcher();
+        let paths = results.iter().map(|(_, addr)| {
+            let doc: ld_lucivy::LucivyDocument = searcher.doc(*addr).unwrap();
+            doc.get_first(path_field)
+                .map(|v| { let o: ld_lucivy::schema::OwnedValue = v.into(); match o { ld_lucivy::schema::OwnedValue::Str(s) => s, _ => String::new() } })
+                .unwrap_or_default()
+        }).collect();
+        (paths, results.len(), before, after)
+    };
+    let mut failures = Vec::new();
     for query_text in &["rag3weaver", "rak3weaver"] {
-        // Collect ALL doc addresses for d=0
-        let qconfig_d0 = QueryConfig {
-            query_type: "contains".into(),
-            field: Some("content".into()),
-            value: Some(query_text.to_string()),
-            distance: Some(0),
-            ..Default::default()
-        };
-        let results_d0 = handle.search(&qconfig_d0, 100_000, None).unwrap();
-        let docs_d0: std::collections::HashSet<u32> = results_d0.iter()
-            .map(|(_, addr)| addr.segment_ord as u32 * 100_000 + addr.doc_id)
-            .collect();
-
-        // Collect ALL doc addresses for d=1
-        let qconfig_d1 = QueryConfig {
-            query_type: "contains".into(),
-            field: Some("content".into()),
-            value: Some(query_text.to_string()),
-            distance: Some(1),
-            ..Default::default()
-        };
-        let results_d1 = handle.search(&qconfig_d1, 100_000, None).unwrap();
-        let docs_d1: std::collections::HashSet<u32> = results_d1.iter()
-            .map(|(_, addr)| addr.segment_ord as u32 * 100_000 + addr.doc_id)
-            .collect();
-
-        let missing: Vec<_> = docs_d0.difference(&docs_d1).collect();
-        eprintln!("  \"{}\": d=0 found {} docs, d=1 found {} docs, missing from d=1: {}",
-            query_text, docs_d0.len(), docs_d1.len(), missing.len());
-        if !missing.is_empty() {
-            for &addr in missing.iter().take(5) {
-                let seg = (addr / 100_000) as u32;
-                let doc = addr % 100_000;
-                eprintln!("    MISSING: seg={} doc={}", seg, doc);
-            }
+        let (d0, hits0, before0, after0) = paths_of(query_text, 0);
+        let (d1, hits1, before1, after1) = paths_of(query_text, 1);
+        let missing: Vec<&String> = d0.difference(&d1).collect();
+        eprintln!("  \"{}\": d=0 {} files ({} hits), d=1 {} files ({} hits), missing from d=1: {}",
+            query_text, d0.len(), hits0, d1.len(), hits1, missing.len());
+        if missing.is_empty() { continue; }
+        eprintln!("    segments around d=0: [{before0}] -> [{after0}]");
+        eprintln!("    segments around d=1: [{before1}] -> [{after1}]");
+        let needle = query_text.to_lowercase();
+        for path in missing.iter().take(10) {
+            let content = files.iter().find(|(p, _)| p == *path).map(|(_, c)| c.as_str()).unwrap_or("");
+            let lower = content.to_lowercase();
+            let at: Vec<usize> = lower.match_indices(&needle).map(|(i, _)| i).take(3).collect();
+            let ctx: Vec<String> = at.iter().map(|&i| {
+                let s = (0..=i.saturating_sub(15)).rev().find(|&k| content.is_char_boundary(k)).unwrap_or(0);
+                let e = (i + needle.len() + 15..=content.len()).find(|&k| content.is_char_boundary(k)).unwrap_or(content.len());
+                content[s..e].replace('\n', "\\n")
+            }).collect();
+            eprintln!("    MISSING {path} ({} bytes, {} occurrences at {:?}) {:?}",
+                content.len(), lower.matches(&needle).count(), at, ctx);
         }
-        assert!(missing.is_empty(), "d=1 must be a superset of d=0 for \"{}\"", query_text);
+        failures.push(query_text.to_string());
     }
+    assert!(failures.is_empty(), "d=1 must be a superset of d=0 for {failures:?}");
     eprintln!("  MONOTONICITY OK");
 }
 
