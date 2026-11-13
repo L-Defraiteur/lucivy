@@ -12,11 +12,11 @@ use std::collections::{HashMap, HashSet};
 
 const ALLOWED: u64 = 10;
 
-fn build(path: &std::path::Path, docs: &[(u64, String)]) -> ShardedHandle {
+fn build(path: &std::path::Path, docs: &[(u64, String)], shards: usize) -> ShardedHandle {
     let _ = std::fs::remove_dir_all(path);
     let config: SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [{ "name": "body", "type": "text" }],
-        "shards": 1
+        "shards": shards
     })).unwrap();
     let index = ShardedHandle::create(path.to_str().unwrap(), &config).unwrap();
     for (id, text) in docs {
@@ -53,12 +53,17 @@ fn query(query_type: &str, value: &str) -> QueryConfig {
 }
 
 #[test]
-fn a_filtered_search_scores_like_the_subset_indexed_alone() {
-    let base = std::env::temp_dir().join(format!("lucivy-filtered-scores-{}", std::process::id()));
+fn one_shard_a_filtered_search_scores_like_the_subset_indexed_alone() { run(1) }
+
+#[test]
+fn two_shards_a_filtered_search_scores_like_the_subset_indexed_alone() { run(2) }
+
+fn run(shards: usize) {
+    let base = std::env::temp_dir().join(format!("lucivy-filtered-scores-{}-{shards}", std::process::id()));
     let docs = corpus();
-    let full = build(&base.join("full"), &docs);
+    let full = build(&base.join("full"), &docs, shards);
     let subset_docs: Vec<_> = docs.iter().filter(|(id, _)| *id < ALLOWED).cloned().collect();
-    let subset = build(&base.join("subset"), &subset_docs);
+    let subset = build(&base.join("subset"), &subset_docs, shards);
     let allowed: HashSet<u64> = (0..ALLOWED).collect();
 
     let mut differences = Vec::new();
@@ -79,5 +84,5 @@ fn a_filtered_search_scores_like_the_subset_indexed_alone() {
     full.close().unwrap();
     subset.close().unwrap();
     let _ = std::fs::remove_dir_all(&base);
-    assert!(differences.is_empty(), "a filtered search does not score like its subset:\n{}", differences.join("\n"));
+    assert!(differences.is_empty(), "{shards} shard(s): a filtered search does not score like its subset ({} differences):\n{}", differences.len(), differences.iter().step_by(10).cloned().collect::<Vec<_>>().join("\n"));
 }
