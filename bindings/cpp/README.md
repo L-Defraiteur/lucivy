@@ -2,7 +2,14 @@
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. From C++. Runs in your process, in your transaction (`lucivy::BlobBackend`), and the same engine runs in the browser. Powered by Rust via a CXX bridge, MIT.
 
-Version 4.3.3 — the lucivy engine of the same number (SFX v3 suffix index, the shared dictionary by default).
+Version 4.3.4 — the lucivy engine of the same number (SFX v3 suffix index, the shared dictionary by default).
+
+### What's new in 4.3.4
+
+A patch release about closing an index. The index format is unchanged.
+
+- **`close()` returns once the index is really released.** It used to return when its actors had acknowledged the shutdown, slightly before they were destroyed: their shards and storage could still be held for a moment after `close()` returned, so reopening the same index right away could find it busy. `close()` now waits for the destruction of every actor, and of the messages still queued to them.
+- **Stopping a scheduler no longer hangs, even rarely.** A thread pool being shut down could miss its wake-up and never return.
 
 ### What's new in 4.3.3
 

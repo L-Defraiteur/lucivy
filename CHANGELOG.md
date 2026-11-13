@@ -1,3 +1,38 @@
+Lucivy 4.3.4 — 13 November 2026
+================================
+
+Fixes about closing an index and stopping actors: the index format is
+unchanged, and indexes written by 4.3.3 or earlier answer as before.
+
+- **Fixed: `close()` returned before its actors were destroyed.** An actor
+  acknowledged its shutdown, then was destroyed: `close()` (and
+  `Pool::shutdown`) returned on the acknowledgement, so a shard, its writer
+  lock and its storage could still be held for a moment after `close()`
+  returned. A program that reopened the same index right after closing it
+  could find it busy. Each actor now completes only once the actor itself, its
+  mailbox and every message still queued to it have been destroyed, even if a
+  message destructor panics; `Pool::shutdown` and `close()` wait for that
+  completion, and `close()` also waits for the router. New:
+  `ActorRef::wait_stopped`.
+
+- **Sends to a stopping actor are refused.** Once an actor's mailbox starts
+  closing, `send` and `try_send` return an error instead of queuing a message
+  that would be dropped. Admission is a single atomic counter with a closing
+  bit, without a lock on the send path: on a microbenchmark of empty messages
+  (one actor, one to four producers), sending costs 2.5 to 4 % more on a
+  pinned actor and up to 13 % more on a worker actor with one producer.
+
+- **Fixed: stopping a scheduler could hang.** `SchedulerHandle` notified its
+  worker threads without holding the queue lock; a worker that had just found
+  the queue empty could miss the notification and sleep forever, so the join
+  never returned (about once in 100 to 150 stops in a test). The notification
+  is now sent under the lock.
+
+- **Behaviour change: shutting down a pool from inside an actor handler
+  panics.** Waiting there for the destruction of actors would wait on the
+  thread that has to run them. `ActorRef::wait_stopped` returns an error in the
+  same situation.
+
 Lucivy 4.3.3 — 11 November 2026
 ================================
 
