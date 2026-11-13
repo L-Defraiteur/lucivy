@@ -363,3 +363,25 @@ fn diag_flou_index_sauve() {
         }
     }
 }
+
+
+/// On a saved index (DIAG_INDEX, a copy), which queries find a missing doc.
+#[test]
+#[ignore]
+fn diag_flou_morceaux() {
+    let path = std::env::var("DIAG_INDEX").expect("DIAG_INDEX");
+    let dir = StdFsDirectory::open(std::path::Path::new(&path)).unwrap();
+    let handle = LucivyHandle::open(dir).unwrap();
+    let path_field = handle.field("path").unwrap();
+    let watched = ["tools/build-images/README.md", "tools/build-images/build.sh",
+        "tools/wasm/test/browser/rag3weaver.spec.js", "extension/rag3weaver/Cargo.toml", "README.md"];
+    let queries = ["rag3weaver", "rag3weave", "ag3weaver", "rag3wea", "3weaver", "rag3w", "eaver", "weaver",
+        "rag3", "rag3xeaver", "rag3weavr", "rag3weaverr", "xrag3weaver", "rag3weaver-backend", "paquet", "binaire", "docker"];
+    for q in queries {
+        for d in [0u8, 1, 2] {
+            let (paths, n, ..) = paths_of(&handle, path_field, q, d);
+            let marks: String = watched.iter().map(|w| if paths.contains(*w) { 'X' } else { '.' }).collect();
+            eprintln!("{q:>20} d={d}: {n:>5} hits  [{marks}]");
+        }
+    }
+}
