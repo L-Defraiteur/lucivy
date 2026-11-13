@@ -640,12 +640,15 @@ impl Scheduler {
 
         actor.on_start(actor_ref.clone());
 
-        let mut wrapper = ActorWrapper { actor, mailbox };
+        let wrapper = ActorWrapper { actor, mailbox };
         let shared = Arc::clone(&self.shared);
 
         std::thread::Builder::new()
             .name(format!("pinned-{name}-{}", id.0))
             .spawn(move || {
+                // Capture the whole wrapper, not disjoint actor/mailbox fields:
+                // its field drop order is the completion guarantee.
+                let mut wrapper = wrapper;
                 let pinned_activity = Arc::new(ActorActivity::new());
                 let ctx = ActorContext {
                     actor_id: id,
