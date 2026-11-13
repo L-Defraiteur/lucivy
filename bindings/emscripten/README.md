@@ -1,8 +1,14 @@
-# lucivy-wasm 4.3.5
+# lucivy-wasm 4.3.6
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. In the browser — the same engine as the native bindings, built with emscripten: **threads** (pthreads over SharedArrayBuffer), OPFS persistence, snapshot import. Runs in a Web Worker. MIT.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — it clones lucivy's own source from GitHub and indexes it in your browser.
+
+### What's new in 4.3.6
+
+A patch release with one addition. The index format is unchanged.
+
+- **Check an index for words lost before 4.3.5.** `checkDictionary()` (Node.js), `check_dictionary()` (Python and Rust) counts the words the shard dictionary lost in an index written before 4.3.5, and says in plain words whether the index must be rebuilt. Read-only.
 
 ### What's new in 4.3.5
 
