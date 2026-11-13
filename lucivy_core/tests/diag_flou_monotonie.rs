@@ -420,3 +420,65 @@ fn diag_flou_ids_sans_texte() {
         if let (Some(min), Some(max)) = (gmap.iter().min(), gmap.iter().max()) { eprintln!("  gmap ids span {min}..={max}"); }
     }
 }
+
+
+/// Sonde des .fts de rag3weaver (13 novembre 2026, session hotfixs de rag3db, pour le ticket
+/// 2026-11-13-un-index-lucivy-ecrit-avant-4-3-5-pendant-des-fusions-garde-ses-mots-perdus) :
+/// DIAG_FTS=<copie d'un dossier .fts> parcourt chaque table (Lucivy_*), chaque shard (shard_*),
+/// chaque champ texte qui a un .gmap, chaque segment, et compte les ids globaux du gmap que le
+/// dictionnaire du shard ne connaît pas (sans texte ou sans META). Ouvre chaque shard avec un
+/// writer : à jouer sur une copie neuve, jamais sur un index en service.
+#[test]
+#[ignore]
+fn diag_ids_sans_texte_tous_champs() {
+    let root = std::path::PathBuf::from(std::env::var("DIAG_FTS").expect("DIAG_FTS"));
+    let mut tables: Vec<_> = std::fs::read_dir(&root).unwrap().filter_map(|e| e.ok()).map(|e| e.path())
+        .filter(|p| p.is_dir()).collect();
+    tables.sort();
+    let (mut grand_ids, mut grand_missing, mut pending_total) = (0u64, 0u64, 0usize);
+    for table in tables {
+        let mut shards: Vec<_> = std::fs::read_dir(&table).unwrap().filter_map(|e| e.ok()).map(|e| e.path())
+            .filter(|p| p.is_dir() && p.file_name().unwrap().to_string_lossy().starts_with("shard_")).collect();
+        shards.sort();
+        for shard in shards {
+            let meta: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(shard.join("meta.json")).unwrap()).unwrap();
+            let pending = meta.get("pending_segments").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            pending_total += pending;
+            let dir = StdFsDirectory::open(&shard).unwrap();
+            let handle = LucivyHandle::open(dir).unwrap();
+            let searcher = handle.reader.searcher();
+            for (field, entry) in handle.schema.fields() {
+                if !matches!(entry.field_type(), ld_lucivy::schema::FieldType::Str(_)) { continue; }
+                let (mut ids, mut missing, mut segs) = (0u64, 0u64, 0usize);
+                for reader in searcher.segment_readers() {
+                    let seg = reader.segment_id().uuid_string();
+                    let gmap_path = shard.join(format!("{seg}.{}.gmap", field.field_id()));
+                    let Ok(bytes) = std::fs::read(&gmap_path) else { continue };
+                    let gmap = ld_lucivy::suffix_fst::gmap::GmapReader::open(&bytes).unwrap();
+                    let Some(dict) = reader.sfx_dictionary_field(field) else {
+                        eprintln!("{}/{} {}: segment {seg} sans dictionnaire", table.display(), shard.display(), entry.name());
+                        continue;
+                    };
+                    let texts = dict.termtexts_reader().expect("dictionary termtexts");
+                    segs += 1;
+                    for g in gmap.iter() {
+                        ids += 1;
+                        if texts.meta(g).is_none() || texts.text(g).is_none() { missing += 1; }
+                    }
+                }
+                if segs > 0 {
+                    eprintln!("CHAMP {} {} {} : segments {segs}, ids {ids}, inconnus {missing}{}",
+                        table.file_name().unwrap().to_string_lossy(), shard.file_name().unwrap().to_string_lossy(),
+                        entry.name(), if missing > 0 { "  <== PERDUS" } else { "" });
+                }
+                grand_ids += ids;
+                grand_missing += missing;
+            }
+            if pending > 0 {
+                eprintln!("ATTENTE {} : {pending} segments dans pending_segments", shard.display());
+            }
+        }
+    }
+    eprintln!("BILAN {} : ids {grand_ids}, inconnus du dictionnaire {grand_missing}, segments en attente {pending_total}",
+        root.display());
+}
