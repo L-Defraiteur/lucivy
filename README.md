@@ -1,4 +1,4 @@
-# lucivy 4.3.4
+# lucivy 4.3.5
 
 [![PyPI](https://img.shields.io/pypi/v/lucivy?label=PyPI&color=blue)](https://pypi.org/project/lucivy/)
 [![npm](https://img.shields.io/npm/v/lucivy?label=npm&color=cb3837)](https://www.npmjs.com/package/lucivy)
@@ -30,6 +30,12 @@ lucivy's own source from GitHub and indexes it in your browser in a few seconds.
 tab. The second half is typed by hand — `index postgres`, then `--strict
 "heap_insert"`, `"CREATE INDEX CONCURRENTLY"` (27 hits, 11 ms), `--fuzzy 1
 "vaccum"` (17 ms) and `--regex "ExecInit[A-Z][a-zA-Z]+\("` (20 ms).*
+
+### What's new in 4.3.5
+
+A patch release with one fix. The index format is unchanged, but **an index built while background merges ran between commits may have lost words: rebuild it** (see the changelog).
+
+- **No more documents silently missing from results.** A background merge that started between two commits made the segments written since the last commit look committed, so their new words were never added to the shard dictionary and were then deleted. Documents using those words dropped out of fuzzy searches entirely, and out of exact searches for the words only they contained. New words are now always kept.
 
 ### What's new in 4.3.4
 
@@ -176,7 +182,7 @@ A patch release that fixes concurrency between searches and writes. The index fo
   3.0.x does not open a 4.0 index; the first commit in 4.0 converts without
   return.
 - One version number for the whole workspace: `ld-lucivy`, `lucivy-core`,
-  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.3.4.
+  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.3.5.
 
 3.0.x brought SFX v3 (exact byte spans on every query mode), boolean syntax,
 Jaro-Winkler, query warnings, bring-your-own-storage in every binding, snapshots

@@ -1,3 +1,39 @@
+Lucivy 4.3.5 — 13 November 2026
+================================
+
+One fix. The index format is unchanged, but **an index written by 4.3.4 or
+earlier with the shard dictionary (the default, sfx v4) may have lost words if
+background merges ran while documents were being added between two commits.
+Such an index keeps the loss: rebuild it.** An index written without
+background merges, or with a single commit, is not affected.
+
+- **Fixed: a merge between two commits lost the words of the new segments.**
+  Starting a merge (from the merge policy, or an explicit `merge`) committed
+  every segment in the segment manager, the ones written since the last commit
+  included, without folding their texts into the shard dictionary. The next
+  commit folds only the segments not committed yet, so it skipped them, and
+  their minted words were then deleted as consumed: they were in no dictionary
+  generation, while the segments still referenced them. A fuzzy `contains`
+  (distance 1 or more) needs a document's text around a match to check the
+  edit distance, could not rebuild it, and dropped the document whatever the
+  word searched: on a clone of the rag3db repository, "rag3weaver" found 1 229
+  files at distance 1 instead of 1 235, and two files were found by no fuzzy
+  query at all. An exact `contains` still found such documents through the
+  words known elsewhere, but not through a word only they contained.
+  Preparing a merge no longer changes which segments are committed; deletes
+  are applied to the merged segments only. Merging segments that are not
+  committed yet is refused on a shard-dictionary index (`InvalidArgument`:
+  commit first), since a merged segment has no word list of its own; the
+  merge policy only proposes committed segments. An explicit merge also no
+  longer makes durable the documents added since the last commit.
+
+- **Tests.** The tests that compare two searches do it by a stable identity
+  (path, `_node_id`, or the document's first line), no longer by
+  `DocAddress`, which is only meaningful for the reader it came from; on a
+  failure, the playground monotonicity test now names the missing files, the
+  hit counts and the segment layout. The Node.js test closes its indexes
+  before removing their directory.
+
 Lucivy 4.3.4 — 13 November 2026
 ================================
 
