@@ -568,6 +568,68 @@ mod tests {
         assert!(replies.is_empty(), "{replies:?}");
     }
 
+    /// Shutdown must not return while the worker destructor still owns resources.
+    /// The destructor gate establishes the interval explicitly; no sleep or DB.
+    #[test]
+    fn shutdown_waits_for_worker_destruction() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        struct DropWorker {
+            entered: mpsc::Sender<()>,
+            release: mpsc::Receiver<()>,
+            resource: Arc<()>,
+        }
+        impl Actor for DropWorker {
+            type Msg = ShutdownMsg;
+            fn name(&self) -> &'static str { "shutdown_drop_gate" }
+            fn handle(&mut self, msg: ShutdownMsg, _ctx: &crate::scheduler::ActorContext) -> ActorStatus {
+                msg.ack();
+                ActorStatus::Stop
+            }
+        }
+        impl Drop for DropWorker {
+            fn drop(&mut self) {
+                let _ = self.entered.send(());
+                // A bounded wait also releases the scheduler if the observer fails.
+                let _ = self.release.recv_timeout(Duration::from_secs(10));
+                // Keep the resource observably owned throughout the gate.
+                assert!(Arc::strong_count(&self.resource) >= 2);
+            }
+        }
+
+        let resource = Arc::new(());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = std::sync::Mutex::new(Some(DropWorker {
+            entered: entered_tx, release: release_rx, resource: resource.clone(),
+        }));
+        let pool = Pool::spawn(1, 16, |_| worker.lock().unwrap().take().unwrap());
+        let (returned_tx, returned_rx) = mpsc::channel();
+        let shutdown = std::thread::spawn(move || {
+            pool.shutdown("shutdown_drop_gate");
+            returned_tx.send(Arc::strong_count(&resource)).unwrap();
+        });
+
+        let entered = entered_rx.recv_timeout(Duration::from_secs(5));
+        // The actor has reached Drop and still holds its resource. An early
+        // shutdown return is a contract failure, even if eventual cleanup works.
+        let early = if entered.is_ok() {
+            Some(returned_rx.recv_timeout(Duration::from_secs(1)))
+        } else {
+            None
+        };
+        // Always release before asserting: a red test must not strand a worker.
+        let _ = release_tx.send(());
+        shutdown.join().unwrap();
+        assert!(entered.is_ok(), "worker destructor was never entered: {entered:?}");
+        assert!(
+            matches!(early, Some(Err(mpsc::RecvTimeoutError::Timeout))),
+            "shutdown returned before worker destruction: {early:?}"
+        );
+        assert_eq!(returned_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+    }
+
     #[test]
     fn test_pool_shutdown() {
         let count = Arc::new(AtomicU32::new(0));
