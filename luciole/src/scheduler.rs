@@ -1053,7 +1053,13 @@ impl SchedulerHandle {
 
     fn do_shutdown(&mut self) {
         self.shared.shutdown.store(true, Ordering::Release);
-        self.shared.work_available.notify_all();
+        {
+            // Notify under the queue lock: a worker checks `shutdown` and then
+            // waits while holding it, so a notification sent between its check
+            // and its wait would otherwise be lost and the join below hang.
+            let _queue = self.shared.ready_queue.lock().unwrap();
+            self.shared.work_available.notify_all();
+        }
         for t in self.threads.drain(..) {
             let _ = t.join();
         }
