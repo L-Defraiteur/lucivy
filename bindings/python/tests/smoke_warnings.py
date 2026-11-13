@@ -39,6 +39,12 @@ r = idx.search({"type": "parse", "field": "body", "value": "kmalloc AND vfree"},
 print("parse AND with absent word ->", len(r), "hit(s)")
 if r:
     print("  EXPECTED no hit"); fails += 1
+check = idx.check_dictionary()
+print("check_dictionary ->", check)
+if (not check["concerned"] or check["needs_rebuild"] or check["unknown"] != 0
+        or not check["summary"].startswith("No lost word")
+        or [f["field"] for f in check["fields"]] != ["shard_0/body"]):
+    print("  EXPECTED a healthy shard dictionary"); fails += 1
 print("FAILS", fails)
 sys.exit(1 if fails else 0)
 sys.exit(1 if fails else 0)

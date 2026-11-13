@@ -719,6 +719,46 @@ impl Index {
         Ok(py.allow_threads(|| handle.query_warnings(&query_config)))
     }
 
+    /// Words the shard dictionary lost before lucivy 4.3.5.
+    ///
+    /// A merge that started between two commits could lose the words of the
+    /// segments written since the last commit: the documents using them went
+    /// missing from fuzzy searches, and from exact searches for the words only
+    /// they contained. 4.3.5 stops new losses but cannot bring lost words back.
+    /// This counts them, read-only. ``needs_rebuild`` is true when the index
+    /// must be rebuilt (its documents added again to a new index); ``summary``
+    /// says it in plain words.
+    ///
+    /// Returns a dict: ``concerned``, ``segments``, ``unknown``,
+    /// ``needs_rebuild``, ``summary`` and ``fields`` (a list of dicts with
+    /// ``field`` — ``shard_<n>/<name>`` —, ``referenced`` and ``unknown``).
+    ///
+    /// Example::
+    ///
+    ///     check = index.check_dictionary()
+    ///     if check["needs_rebuild"]:
+    ///         print(check["summary"])
+    fn check_dictionary<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let handle = self.h()?;
+        let check = py.allow_threads(|| handle.check_dictionary()).map_err(PyValueError::new_err)?;
+        let out = PyDict::new(py);
+        out.set_item("concerned", check.concerned)?;
+        out.set_item("segments", check.segments)?;
+        out.set_item("unknown", check.unknown())?;
+        out.set_item("needs_rebuild", check.needs_rebuild())?;
+        out.set_item("summary", check.summary())?;
+        let fields = PyList::empty(py);
+        for f in &check.fields {
+            let d = PyDict::new(py);
+            d.set_item("field", &f.field)?;
+            d.set_item("referenced", f.referenced)?;
+            d.set_item("unknown", f.unknown)?;
+            fields.append(d)?;
+        }
+        out.set_item("fields", fields)?;
+        Ok(out)
+    }
+
     #[pyo3(signature = (query, limit=10, highlights=false, allowed_ids=None, fields=false))]
     fn search(
         &self,

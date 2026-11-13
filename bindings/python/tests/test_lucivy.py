@@ -967,3 +967,14 @@ class TestSnapshot:
         # Should not raise — rollback clears uncommitted
         blob = idx.export_snapshot()
         assert len(blob) > 12
+
+
+class TestCheckDictionary:
+    def test_a_healthy_index_needs_no_rebuild(self, index):
+        check = index.check_dictionary()
+        assert check["concerned"] is True
+        assert check["needs_rebuild"] is False
+        assert check["unknown"] == 0
+        assert check["summary"].startswith("No lost word")
+        assert [f["field"] for f in check["fields"]] == ["shard_0/title", "shard_0/body"]
+        assert all(f["referenced"] > 0 and f["unknown"] == 0 for f in check["fields"])
