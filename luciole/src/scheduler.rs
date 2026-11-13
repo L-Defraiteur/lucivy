@@ -1511,7 +1511,7 @@ mod tests {
 
     // Exercise both dispatch paths. A queued message owns a second resource:
     // completion must cover mailbox destruction as well as the actor itself.
-    fn destruction_completion(num_threads: usize) {
+    fn destruction_completion(num_threads: usize, pinned: bool) {
         struct Owner(Arc<()>);
         enum Msg { Stop(crate::ShutdownMsg), Pending(Arc<()>) }
         impl Actor for Owner {
@@ -1532,12 +1532,14 @@ mod tests {
         let owned = Arc::new(());
         let pending = Arc::new(());
         let (mailbox, mut actor_ref) = crate::mailbox(8);
-        scheduler.spawn(Owner(owned.clone()), mailbox, &mut actor_ref, 8);
+        let owner = Owner(owned.clone());
         let (ack, response) = crate::reply();
         assert!(actor_ref.send(Msg::Stop(crate::ShutdownMsg(ack))).is_ok());
         assert!(actor_ref.send(Msg::Pending(pending.clone())).is_ok());
-        // Start workers only after the mailbox has both messages.
-        let _workers = if num_threads > 1 { Some(scheduler.start()) } else { None };
+        // Queue both messages before either dispatch path can consume Stop.
+        if pinned { scheduler.spawn_pinned(owner, mailbox, &mut actor_ref, 8); }
+        else { scheduler.spawn(owner, mailbox, &mut actor_ref, 8); }
+        let _workers = if num_threads > 1 && !pinned { Some(scheduler.start()) } else { None };
         scheduler.try_wait(response, "stop_ack").unwrap();
         actor_ref.wait_stopped(&scheduler, "destroyed").unwrap();
         assert_eq!(Arc::strong_count(&owned), 1);
@@ -1547,10 +1549,13 @@ mod tests {
     }
 
     #[test]
-    fn destruction_completion_cooperative() { destruction_completion(1); }
+    fn destruction_completion_cooperative() { destruction_completion(1, false); }
 
     #[test]
-    fn destruction_completion_worker() { destruction_completion(2); }
+    fn destruction_completion_worker() { destruction_completion(2, false); }
+
+    #[test]
+    fn destruction_completion_pinned() { destruction_completion(2, true); }
 
     #[test]
     fn pinned_handler_rejects_self_join() {
