@@ -3260,6 +3260,21 @@ impl ShardedHandle {
             .sum()
     }
 
+    /// Count, on every shard, the word ids the committed segments reference
+    /// and the shard dictionary no longer knows: words lost by a merge between
+    /// two commits before 4.3.5 (see [`crate::dictionary_check`]). One entry
+    /// per shard and text field, named `shard_<n>/<field>`. Read-only.
+    pub fn check_dictionary(&self) -> Result<crate::dictionary_check::DictionaryCheck, String> {
+        let mut total = crate::dictionary_check::DictionaryCheck { concerned: false, segments: 0, fields: Vec::new() };
+        for (i, shard) in self.shards.iter().enumerate() {
+            let check = shard.check_dictionary_named(&format!("shard_{i}/"))?;
+            total.concerned |= check.concerned;
+            total.segments += check.segments;
+            total.fields.extend(check.fields);
+        }
+        Ok(total)
+    }
+
     /// Access a shard's LucivyHandle (for advanced use, e.g. reading stored fields).
     pub fn shard(&self, shard_id: usize) -> Option<&LucivyHandle> {
         self.shards.get(shard_id).map(|arc| arc.as_ref())
