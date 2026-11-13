@@ -385,3 +385,38 @@ fn diag_flou_morceaux() {
         }
     }
 }
+
+
+/// On a saved index (DIAG_INDEX, a copy): global ids the segment's gmap names
+/// that the shard dictionary has no text or META for.
+#[test]
+#[ignore]
+fn diag_flou_ids_sans_texte() {
+    let path = std::env::var("DIAG_INDEX").expect("DIAG_INDEX");
+    let dir = StdFsDirectory::open(std::path::Path::new(&path)).unwrap();
+    let handle = LucivyHandle::open(dir).unwrap();
+    let content = handle.field("content").unwrap();
+    let searcher = handle.reader.searcher();
+    for reader in searcher.segment_readers() {
+        let seg = reader.segment_id().uuid_string();
+        let gmap_path = std::path::Path::new(&path).join(format!("{seg}.{}.gmap", content.field_id()));
+        let bytes = std::fs::read(&gmap_path).unwrap();
+        let gmap = ld_lucivy::suffix_fst::gmap::GmapReader::open(&bytes).unwrap();
+        let dict = reader.sfx_dictionary_field(content).expect("dictionary field");
+        let texts = dict.termtexts_reader().expect("dictionary termtexts");
+        let mut missing: Vec<u32> = Vec::new();
+        let mut total = 0u32;
+        for g in gmap.iter() {
+            total += 1;
+            if texts.meta(g).is_none() || texts.text(g).is_none() { missing.push(g); }
+        }
+        let mut ranges: Vec<(u32, u32)> = Vec::new();
+        for &g in &missing {
+            match ranges.last_mut() { Some(r) if r.1 + 1 == g => r.1 = g, _ => ranges.push((g, g)) }
+        }
+        eprintln!("segment {seg}: gmap {} ids ({} counted), dictionary {} terms, without text/meta: {}",
+            gmap.len(), total, texts.num_terms(), missing.len());
+        eprintln!("  ranges (first 20 of {}): {:?}", ranges.len(), ranges.iter().take(20).collect::<Vec<_>>());
+        if let (Some(min), Some(max)) = (gmap.iter().min(), gmap.iter().max()) { eprintln!("  gmap ids span {min}..={max}"); }
+    }
+}
