@@ -417,6 +417,9 @@ fn test_fuzzy_ground_truth() {
             ..Default::default()
         };
         let results = handle.search(&qconfig, 10_000, Some(sink.clone())).unwrap();
+        // The addresses belong to the reader as it stands after the search: a
+        // search may reload it once the dictionary's background fold lands.
+        let searcher = handle.reader.searcher();
         eprintln!("Query returned {} results", results.len());
 
         let mut found_doc_indices: HashSet<usize> = HashSet::new();

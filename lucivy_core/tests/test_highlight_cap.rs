@@ -69,6 +69,7 @@ fn a_capped_sink_still_yields_complete_highlights_for_the_top_k() {
     // Reference: unbounded sink.
     let full = Arc::new(HighlightSink::with_cap(usize::MAX));
     let full_results = index.search(&query(), TOP_K, Some(full.clone())).unwrap();
+    let full_ids = index.node_ids_of(&full_results).unwrap();
     assert_eq!(full_results.len(), TOP_K);
     assert!(!full.overflowed());
     assert_eq!(full.span_count(), DOCS * SPANS_PER_DOC, "every verified document records its spans");
@@ -80,12 +81,16 @@ fn a_capped_sink_still_yields_complete_highlights_for_the_top_k() {
     // Capped sink: the first pass overflows, the repair pass fills the top-k.
     let capped = Arc::new(HighlightSink::with_cap(CAP));
     let capped_results = index.search(&query(), TOP_K, Some(capped.clone())).unwrap();
+    // Compare by `_node_id`, resolved right after each search: a search may
+    // reload a shard's reader, and a segment ordinal is only meaningful for
+    // the reader it came from.
     assert!(!capped.overflowed(), "repaired for the top-k only, under the cap");
     assert_eq!(capped.span_count(), TOP_K * SPANS_PER_DOC);
-    let ids = |rs: &[lucivy_core::sharded_handle::ShardedSearchResult]| rs.iter()
-        .map(|r| (r.shard_id, r.doc_address.segment_ord, r.doc_address.doc_id, r.score.to_bits()))
+    let capped_ids = index.node_ids_of(&capped_results).unwrap();
+    let ids = |rs: &[lucivy_core::sharded_handle::ShardedSearchResult], nodes: &[u64]| rs.iter().zip(nodes)
+        .map(|(r, node)| (*node, r.score.to_bits()))
         .collect::<Vec<_>>();
-    assert_eq!(ids(&capped_results), ids(&full_results), "scores and order come from the first pass");
+    assert_eq!(ids(&capped_results, &capped_ids), ids(&full_results, &full_ids), "scores and order come from the first pass");
     assert_eq!(highlights_of(&index, &capped, &capped_results), full_hl);
 
     // The sink `search_with_docs` creates follows the environment cap.
