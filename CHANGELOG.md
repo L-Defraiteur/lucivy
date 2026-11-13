@@ -1,5 +1,7 @@
-Unreleased
-==========
+Lucivy 4.3.6 — 13 November 2026
+================================
+
+One addition: the index format is unchanged.
 
 - **New: check an index for words lost before 4.3.5.** `check_dictionary()`
   (Rust: `LucivyHandle` and `ShardedHandle`; Node.js: `index.checkDictionary()`;
