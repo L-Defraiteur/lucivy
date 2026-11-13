@@ -533,6 +533,17 @@ Publier reste une décision explicite de Lucie.
 Chemin suivi : branche de travail → PR vers `main` → fusion en avance rapide → tag sur `main`. Deux aléas en route :
 un `startup_failure` de GitHub (relancé, sans rapport avec nos fichiers) et un test qui comparait un top-10 d'ex æquo
 (`test_snapshot_served`, corrigé comme le roundtrip LUCE l'avait été).
+**4.3.5 publiée le 13 novembre 2026 vers 20 h** (tag `v4.3.5`, `main` = `aaa7160`, PR #27 puis #28, rebase ; tag posé sur
+le mot de Lucie après CI et bâti verts du SHA exact) : une fusion lancée entre deux commits (politique :
+`handle_start_merges` ; explicite : `handle_merge`, qui déroulait le DAG du commit) promouvait les segments écrits depuis
+le dernier commit sans replier leurs textes dans le dictionnaire partagé ; le commit suivant les sautait et
+`delete_consumed_pairs` effaçait leur paire : mots perdus, documents écartés par le flou (« NO WINDOW ») et introuvables
+par un mot qu'eux seuls portaient. Trouvé par `test_playground_repro` réécrit (comparaison par chemin, détail en échec),
+puis figé sur un index sauvé (31 862 ids du gmap sans texte dans le dictionnaire) ; témoin
+`test_merge_keeps_new_words`. Correctif : `PrepareNode` ne promeut que dans un commit, `merge_entries_outside_commit`
+pour les deux portes, fusion de segments non commités refusée en v4. **Un index déjà touché garde la perte : à
+reconstruire** (dit dans le CHANGELOG). Tests comparant deux recherches par identité stable, test Node qui ferme ses
+index. Jobs macOS sans runner relancés à chaque run (piste : bâtir darwin sous Linux avec zig, à essayer).
 **4.3.4 publiée le 13 novembre 2026 vers 16 h 15** (tag `v4.3.4`, `main` = `89c024d`, PR #26 depuis la branche `4.3.4`,
 rebase ; tag posé sur le mot de Lucie après la CI et le bâti verts du SHA exact) : la variante C des barrières d'arrêt
 (Codex, `fa1d027` : admission des envois par un compteur atomique à bit de fermeture, garde empruntée), une boîte
@@ -612,10 +623,10 @@ et à l'environnement `release`).
 
 | Registre | Package | Publié | Date |
 |----------|---------|---------|---------|
-| PyPI | `lucivy` | **4.3.4** (13 novembre 2026), **4.3.3** (11 novembre 2026), **4.3.2** (7 novembre 2026), **4.3.1** (25 octobre 2026), **4.3.0** (14 septembre 2026), **4.2.0** (13 septembre 2026 au soir), **4.1.0** (13 septembre 2026), **4.0.0**, **4.0.1**, **4.0.2** (5 wheels `cp39-abi3` : manylinux_2_28 x86_64 + aarch64, macOS x86_64 + arm64, win_amd64 ; + sdist) — par le tag | 6 septembre 2026 (nuit, puis 14 h 30) |
-| npm | `lucivy` + `lucivy-linux-x64-gnu`, `lucivy-linux-arm64-gnu`, `lucivy-darwin-x64`, `lucivy-darwin-arm64`, `lucivy-windows-x64` | **4.3.4**, **4.3.3**, **4.3.2**, **4.3.1**, **4.3.0**, **4.2.0**, **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** — par le tag | 6 septembre 2026 (nuit, puis 14 h 30) |
-| npm | `lucivy-wasm` | **4.3.4**, **4.3.3**, **4.3.2**, **4.3.1**, **4.3.0**, **4.2.0**, **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** (job `wasm` + `publish-wasm`) | 6 septembre 2026 (nuit, puis 14 h 30) |
-| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` (+ `lucivy-fst` 0.1.x) | **4.3.4** (13 novembre, par le tag, après relance des jobs macOS), **4.3.3** (11 novembre, par le tag, d'un coup), **4.3.2** (7 novembre, par le tag, d'un coup), **4.3.1** (25 octobre, par le tag, d'un coup), **4.3.0** (14 septembre, par le tag, d'un coup), **4.2.0** (le 13 septembre au soir : `luciole` et `lucistore` par le tag, `lucivy-fst` 0.1.1, `ld-lucivy`, `lucivy-core` et `sparse-vector` par le dispatch de rattrapage), **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** — par le tag, en dernier | 6 septembre 2026 (nuit, puis 14 h 30) |
+| PyPI | `lucivy` | **4.3.5** (13 novembre 2026, soir), **4.3.4** (13 novembre 2026), **4.3.3** (11 novembre 2026), **4.3.2** (7 novembre 2026), **4.3.1** (25 octobre 2026), **4.3.0** (14 septembre 2026), **4.2.0** (13 septembre 2026 au soir), **4.1.0** (13 septembre 2026), **4.0.0**, **4.0.1**, **4.0.2** (5 wheels `cp39-abi3` : manylinux_2_28 x86_64 + aarch64, macOS x86_64 + arm64, win_amd64 ; + sdist) — par le tag | 6 septembre 2026 (nuit, puis 14 h 30) |
+| npm | `lucivy` + `lucivy-linux-x64-gnu`, `lucivy-linux-arm64-gnu`, `lucivy-darwin-x64`, `lucivy-darwin-arm64`, `lucivy-windows-x64` | **4.3.5**, **4.3.4**, **4.3.3**, **4.3.2**, **4.3.1**, **4.3.0**, **4.2.0**, **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** — par le tag | 6 septembre 2026 (nuit, puis 14 h 30) |
+| npm | `lucivy-wasm` | **4.3.5**, **4.3.4**, **4.3.3**, **4.3.2**, **4.3.1**, **4.3.0**, **4.2.0**, **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** (job `wasm` + `publish-wasm`) | 6 septembre 2026 (nuit, puis 14 h 30) |
+| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` (+ `lucivy-fst` 0.1.x) | **4.3.5** (13 novembre au soir, par le tag, après relance d'un job macOS), **4.3.4** (13 novembre, par le tag, après relance des jobs macOS), **4.3.3** (11 novembre, par le tag, d'un coup), **4.3.2** (7 novembre, par le tag, d'un coup), **4.3.1** (25 octobre, par le tag, d'un coup), **4.3.0** (14 septembre, par le tag, d'un coup), **4.2.0** (le 13 septembre au soir : `luciole` et `lucistore` par le tag, `lucivy-fst` 0.1.1, `ld-lucivy`, `lucivy-core` et `sparse-vector` par le dispatch de rattrapage), **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** — par le tag, en dernier | 6 septembre 2026 (nuit, puis 14 h 30) |
 | (avant) | tout | 3.0.7 le 28 août (nuit), 3.0.8 le 28 août à 15 h | |
 
 3.0.7 dans la nuit du 27 au 28, juste après 3.0.6 : **le fuzzy relâché
