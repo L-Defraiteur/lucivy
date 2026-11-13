@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use flume as channel;
@@ -8,10 +8,14 @@ use super::scheduler::SchedulerNotifier;
 
 /// Completion shared by all references, independent of the shutdown protocol.
 /// A reply is delivered only after the receiver and owning actor are dropped.
-struct SendState { closing: bool, active: usize }
+// One linearization point for admission versus close. Low bits count sends;
+// the high bit permanently closes admission. No separate check/increment race.
+const CLOSING: usize = 1usize << (usize::BITS - 1);
+const ACTIVE_SENDS: usize = CLOSING - 1;
 
 struct Completion {
-    sends: Mutex<SendState>,
+    sends: AtomicUsize,
+    send_wait: Mutex<()>,
     sends_changed: Condvar,
     waiters: Mutex<Option<Vec<crate::Reply<()>>>>,
 }
@@ -19,16 +23,21 @@ struct Completion {
 impl Completion {
     fn new() -> Self {
         Self {
-            sends: Mutex::new(SendState { closing: false, active: 0 }),
+            sends: AtomicUsize::new(0),
+            send_wait: Mutex::new(()),
             sends_changed: Condvar::new(),
             waiters: Mutex::new(Some(Vec::new())),
         }
     }
-    fn begin_send(self: &Arc<Self>) -> Option<SendGuard> {
-        let mut state = self.sends.lock().unwrap();
-        if state.closing { return None; }
-        state.active += 1;
-        Some(SendGuard(self.clone()))
+    fn begin_send(&self) -> Option<SendGuard<'_>> {
+        let mut state = self.sends.load(Ordering::Acquire);
+        loop {
+            if state & CLOSING != 0 || state & ACTIVE_SENDS == ACTIVE_SENDS { return None; }
+            match self.sends.compare_exchange_weak(state, state + 1, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return Some(SendGuard(self)),
+                Err(current) => state = current,
+            }
+        }
     }
     fn subscribe(&self) -> crate::ReplyReceiver<()> {
         let (tx, rx) = crate::reply();
@@ -48,12 +57,19 @@ impl Completion {
     }
 }
 
-struct SendGuard(Arc<Completion>);
-impl Drop for SendGuard {
+// Borrowed from ActorRef for the duration of send/try_send: no Arc clone.
+struct SendGuard<'a>(&'a Completion);
+impl Drop for SendGuard<'_> {
     fn drop(&mut self) {
-        let mut state = self.0.sends.lock().unwrap();
-        state.active -= 1;
-        self.0.sends_changed.notify_all();
+        let previous = self.0.sends.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous & ACTIVE_SENDS > 0);
+        if previous & CLOSING != 0 {
+            // Pair with the closer's check/wait mutex. Even intermediate
+            // completions wake it: a full bounded queue may need draining
+            // before the LAST admitted sender can finish.
+            let _wait = self.0.send_wait.lock().unwrap();
+            self.0.sends_changed.notify_all();
+        }
     }
 }
 
@@ -82,15 +98,15 @@ impl<M> Drop for Mailbox<M> {
                 }
             }
         };
-        completion.sends.lock().unwrap().closing = true;
+        completion.sends.fetch_or(CLOSING, Ordering::AcqRel);
         loop {
             // Free bounded-channel slots so sends admitted before closing can
             // finish. Drop messages outside our locks: their destructors may
             // send to other actors (or attempt a now-rejected send to this one).
             let pending: Vec<_> = self.receiver.drain().collect();
             discard(pending);
-            let mut state = completion.sends.lock().unwrap();
-            if state.active == 0 {
+            let mut state = completion.send_wait.lock().unwrap();
+            if completion.sends.load(Ordering::Acquire) & ACTIVE_SENDS == 0 {
                 drop(state);
                 // No admitted sender remains and no new sender can enter.
                 let remaining: Vec<_> = self.receiver.drain().collect();
@@ -338,6 +354,20 @@ mod destruction_tests {
     use super::*;
 
     #[test]
+    fn atomic_admission_keeps_count_when_closing() {
+        let completion = Completion::new();
+        let first = completion.begin_send().unwrap();
+        let second = completion.begin_send().unwrap();
+        assert_eq!(completion.sends.fetch_or(CLOSING, Ordering::AcqRel), 2);
+        assert!(completion.begin_send().is_none());
+        drop(first);
+        assert_eq!(completion.sends.load(Ordering::Acquire), CLOSING | 1);
+        drop(second);
+        assert_eq!(completion.sends.load(Ordering::Acquire), CLOSING);
+        assert!(completion.begin_send().is_none());
+    }
+
+    #[test]
     fn completion_drains_admitted_send_and_rejects_new_sends() {
         let (mailbox, actor_ref) = mailbox::<Arc<()>>(1);
         let resource = Arc::new(());
@@ -347,13 +377,15 @@ mod destruction_tests {
         let admitted = actor_ref.completion.begin_send().unwrap();
         let sender = actor_ref.sender.clone();
         let payload = resource.clone();
-        let sending = std::thread::spawn(move || {
-            let result = sender.send(payload);
-            drop(admitted);
-            result
+        std::thread::scope(|scope| {
+            let sending = scope.spawn(move || {
+                let result = sender.send(payload);
+                drop(admitted);
+                result
+            });
+            drop(mailbox);
+            sending.join().unwrap().unwrap();
         });
-        drop(mailbox);
-        sending.join().unwrap().unwrap();
         actor_ref.wait_stopped(&crate::Scheduler::new(1), "mailbox_destroyed").unwrap();
         assert_eq!(Arc::strong_count(&resource), 1);
         assert!(actor_ref.send(resource.clone()).is_err());
