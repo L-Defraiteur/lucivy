@@ -12,3 +12,4 @@ le corrige.
 | [2026-11-07-un-passage-exact-long-n-est-plus-trouve](2026-11-07-un-passage-exact-long-n-est-plus-trouve.md) | fermé |
 | [2026-11-08-un-test-de-corpus-sans-son-corpus-passe-vert](2026-11-08-un-test-de-corpus-sans-son-corpus-passe-vert.md) | corrigé, PR #22 |
 | [2026-11-08-close-sort-sur-l-erreur-sans-arreter-ses-pools](2026-11-08-close-sort-sur-l-erreur-sans-arreter-ses-pools.md) | corrigé, PR #23 |
+| [2026-11-13-le-flou-a-distance-1-perd-des-documents-trouves-a-distance-0](2026-11-13-le-flou-a-distance-1-perd-des-documents-trouves-a-distance-0.md) | ouvert |
