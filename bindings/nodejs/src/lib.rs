@@ -314,6 +314,23 @@ impl Index {
         Ok(self.h()?.query_warnings(&query_config))
     }
 
+    /// Words the shard dictionary lost before lucivy 4.3.5.
+    ///
+    /// A merge that started between two commits could lose the words of the
+    /// segments written since the last commit: the documents using them went
+    /// missing from fuzzy searches, and from exact searches for the words only
+    /// they contained. 4.3.5 stops new losses but cannot bring lost words back.
+    /// This counts them, read-only: `needsRebuild` is true when the index must
+    /// be rebuilt (its documents added again to a new index); `summary` says it
+    /// in plain words.
+    ///
+    /// Returns `{concerned, segments, unknown, needsRebuild, summary, fields:
+    /// [{field, referenced, unknown}]}` (`field` is `shard_<n>/<name>`).
+    #[napi(ts_return_type = "{ concerned: boolean, segments: number, unknown: number, needsRebuild: boolean, summary: string, fields: Array<{ field: string, referenced: number, unknown: number }> }")]
+    pub fn check_dictionary(&self) -> Result<serde_json::Value> {
+        check_dictionary_json(self.h()?).map_err(|e| Error::from_reason(e))
+    }
+
     /// @param options - `{limit?: number, highlights?: boolean, fields?: boolean, allowedIds?: number[]}`
     #[napi]
     pub fn search(
@@ -1636,6 +1653,12 @@ impl BlobIndex {
         })
     }
 
+    /// Words the shard dictionary lost before lucivy 4.3.5. See `Index.checkDictionary()`.
+    #[napi(ts_return_type = "Promise<{ concerned: boolean, segments: number, unknown: number, needsRebuild: boolean, summary: string, fields: Array<{ field: string, referenced: number, unknown: number }> }>")]
+    pub fn check_dictionary(&self) -> AsyncTask<BlobTask<serde_json::Value>> {
+        self.run(|h, _| check_dictionary_json(h).map_err(|e| Error::from_reason(e)))
+    }
+
     /// Number of documents across all shards.
     #[napi(ts_return_type = "Promise<number>")]
     pub fn num_docs(&self) -> AsyncTask<BlobTask<u32>> {
@@ -1753,4 +1776,19 @@ mod tests {
         assert_eq!(q.field.as_deref(), Some("content"));
         assert_eq!(q.distance, Some(3));
     }
+}
+
+/// `ShardedHandle::check_dictionary` as a plain JS object.
+fn check_dictionary_json(h: &ShardedHandle) -> std::result::Result<serde_json::Value, String> {
+    let check = h.check_dictionary()?;
+    Ok(serde_json::json!({
+        "concerned": check.concerned,
+        "segments": check.segments,
+        "unknown": check.unknown(),
+        "needsRebuild": check.needs_rebuild(),
+        "summary": check.summary(),
+        "fields": check.fields.iter().map(|f| serde_json::json!({
+            "field": f.field, "referenced": f.referenced, "unknown": f.unknown,
+        })).collect::<Vec<_>>(),
+    }))
 }

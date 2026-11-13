@@ -39,5 +39,11 @@ for (const value of ['kmalloc spin', 'kmalloc AND NOT vfree', '"spin_lock" -vfre
 const none = idx.search({ type: 'parse', field: 'body', value: 'kmalloc AND vfree' }, { highlights: true });
 console.log('parse AND with absent word ->', none.length, 'hit(s)');
 if (none.length) { console.log('  EXPECTED no hit'); fails++; }
+const check = idx.checkDictionary();
+console.log('checkDictionary ->', JSON.stringify(check));
+if (!check.concerned || check.needsRebuild || check.unknown !== 0 || !check.summary.startsWith('No lost word')
+    || check.fields.map(f => f.field).join() !== 'shard_0/body') {
+  console.log('  EXPECTED a healthy shard dictionary'); fails++;
+}
 console.log('FAILS', fails);
 process.exit(fails ? 1 : 0);
