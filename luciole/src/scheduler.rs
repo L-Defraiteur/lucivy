@@ -19,6 +19,15 @@ thread_local! {
     static COOPERATIVE_WAIT_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
+/// Restore nesting correctly even if a callback unwinds.
+struct HandlerGuard(bool);
+impl HandlerGuard {
+    fn enter() -> Self { Self(IN_ACTOR_HANDLER.with(|c| c.replace(true))) }
+}
+impl Drop for HandlerGuard {
+    fn drop(&mut self) { IN_ACTOR_HANDLER.with(|c| c.set(self.0)); }
+}
+
 /// Returns true if the current thread is a scheduler worker thread.
 /// Used by execute_dag to decide between parallel and inline execution.
 pub fn is_scheduler_thread() -> bool {
@@ -403,6 +412,7 @@ struct ActorWrapper<A: Actor> {
 impl<A: Actor> AnyActor for ActorWrapper<A> {
     fn try_handle_one(&mut self, ctx: &ActorContext) -> Option<ActorStatus> {
         let msg = self.mailbox.try_recv()?;
+        let _handler = HandlerGuard::enter();
         Some(self.actor.handle(msg, ctx))
     }
 
@@ -560,7 +570,7 @@ impl Scheduler {
 
     pub fn spawn<A: Actor>(
         &self,
-        mut actor: A,
+        actor: A,
         mailbox: Mailbox<A::Msg>,
         actor_ref: &mut ActorRef<A::Msg>,
         capacity: usize,
@@ -581,9 +591,11 @@ impl Scheduler {
         });
         attach_wake_handle(actor_ref, Arc::clone(&wake_handle));
 
-        actor.on_start(actor_ref.clone());
-
-        let wrapper = ActorWrapper { actor, mailbox };
+        let mut wrapper = ActorWrapper { actor, mailbox };
+        {
+            let _handler = HandlerGuard::enter();
+            wrapper.actor.on_start(actor_ref.clone());
+        }
         let priority = wrapper.priority();
 
         {
@@ -625,7 +637,7 @@ impl Scheduler {
     /// Utilisé pour les IndexerWorkers qui sont le hot path d'ingestion.
     pub fn spawn_pinned<A: Actor>(
         &self,
-        mut actor: A,
+        actor: A,
         mailbox: Mailbox<A::Msg>,
         actor_ref: &mut ActorRef<A::Msg>,
         _capacity: usize,
@@ -638,9 +650,11 @@ impl Scheduler {
         // pas par le scheduler, le thread dédié est bloqué sur recv().
         // → ActorRef.notifier reste None → send() fait juste flume.send().
 
-        actor.on_start(actor_ref.clone());
-
-        let wrapper = ActorWrapper { actor, mailbox };
+        let mut wrapper = ActorWrapper { actor, mailbox };
+        {
+            let _handler = HandlerGuard::enter();
+            wrapper.actor.on_start(actor_ref.clone());
+        }
         let shared = Arc::clone(&self.shared);
 
         std::thread::Builder::new()
@@ -661,7 +675,10 @@ impl Scheduler {
                     }
                     match wrapper.mailbox.receiver.recv() {
                         Ok(msg) => {
-                            let status = wrapper.actor.handle(msg, &ctx);
+                            let status = {
+                                let _handler = HandlerGuard::enter();
+                                wrapper.actor.handle(msg, &ctx)
+                            };
                             match status {
                                 ActorStatus::Stop => return,
                                 ActorStatus::Yield | ActorStatus::Continue => {}
@@ -1250,9 +1267,7 @@ fn handle_batch(
     for _ in 0..BATCH_SIZE {
         let start = Instant::now();
 
-        IN_ACTOR_HANDLER.with(|c| c.set(true));
         let handle_result = actor.try_handle_one(&ctx);
-        IN_ACTOR_HANDLER.with(|c| c.set(false));
 
         match handle_result {
             Some(status) => {
@@ -1399,9 +1414,7 @@ fn run_one_step_actor(shared: &Arc<SharedState>, actor_id: ActorId, entry_priori
     };
     activity.set("processing");
     let start = Instant::now();
-    IN_ACTOR_HANDLER.with(|c| c.set(true));
     let handle_result = actor_box.try_handle_one(&ctx);
-    IN_ACTOR_HANDLER.with(|c| c.set(false));
     let (stopped, idle, suspended) = match handle_result {
         Some(status) => {
             shared.events.emit(SchedulerEvent::MessageHandled {
@@ -1538,6 +1551,58 @@ mod tests {
 
     #[test]
     fn destruction_completion_worker() { destruction_completion(2); }
+
+    #[test]
+    fn pinned_handler_rejects_self_join() {
+        struct SelfJoin {
+            myself: ActorRef<crate::Reply<bool>>,
+        }
+        impl Actor for SelfJoin {
+            type Msg = crate::Reply<bool>;
+            fn name(&self) -> &'static str { "self_join" }
+            fn priority(&self) -> Priority { Priority::Medium }
+            fn handle(&mut self, reply: Self::Msg, _ctx: &ActorContext) -> ActorStatus {
+                reply.send(self.myself.wait_stopped(global_scheduler(), "self_join").is_err());
+                ActorStatus::Stop
+            }
+        }
+        let scheduler = Scheduler::new(2);
+        let (mailbox, mut actor_ref) = crate::mailbox(1);
+        scheduler.spawn_pinned(SelfJoin { myself: actor_ref.clone() }, mailbox, &mut actor_ref, 1);
+        let (tx, rx) = crate::reply();
+        actor_ref.send(tx).unwrap();
+        assert!(scheduler.try_wait(rx, "self_join_rejected").unwrap());
+        actor_ref.wait_stopped(&scheduler, "pinned_destroyed").unwrap();
+    }
+
+    #[test]
+    fn on_start_panic_preserves_destruction_order_and_handler_flag() {
+        struct StartPanic(Arc<()>);
+        impl Actor for StartPanic {
+            type Msg = ();
+            fn name(&self) -> &'static str { "start_panic" }
+            fn priority(&self) -> Priority { Priority::Medium }
+            fn handle(&mut self, _: (), _: &ActorContext) -> ActorStatus { ActorStatus::Stop }
+            fn on_start(&mut self, _: ActorRef<()>) { panic!("expected start failure"); }
+        }
+        impl Drop for StartPanic {
+            fn drop(&mut self) { assert!(Arc::strong_count(&self.0) >= 2); }
+        }
+        for pinned in [false, true] {
+            let scheduler = Scheduler::new(1);
+            let owned = Arc::new(());
+            let (mailbox, mut actor_ref) = crate::mailbox(1);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let actor = StartPanic(owned.clone());
+                if pinned { scheduler.spawn_pinned(actor, mailbox, &mut actor_ref, 1); }
+                else { scheduler.spawn(actor, mailbox, &mut actor_ref, 1); }
+            }));
+            assert!(result.is_err());
+            assert!(!in_actor_handler());
+            actor_ref.wait_stopped(&scheduler, "start_unwound").unwrap();
+            assert_eq!(Arc::strong_count(&owned), 1);
+        }
+    }
 
     struct Counter {
         count: u32,
