@@ -640,6 +640,29 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_without_reply_releases_worker_resource() {
+        struct Silent(Arc<()>);
+        impl Actor for Silent {
+            type Msg = ShutdownMsg;
+            fn name(&self) -> &'static str { "silent_shutdown" }
+            fn priority(&self) -> Priority { Priority::Medium }
+            fn handle(&mut self, msg: ShutdownMsg, _: &crate::scheduler::ActorContext) -> ActorStatus {
+                drop(msg); // Receiver observes ReplyClosed before actor Drop.
+                ActorStatus::Stop
+            }
+        }
+        impl Drop for Silent {
+            fn drop(&mut self) { assert!(Arc::strong_count(&self.0) >= 2); }
+        }
+        let resource = Arc::new(());
+        let pool = Pool::spawn(1, 16, |_| Silent(resource.clone()));
+        pool.shutdown("silent_worker");
+        assert_eq!(Arc::strong_count(&resource), 1);
+        pool.shutdown("silent_worker_again");
+        assert_eq!(Arc::strong_count(&resource), 1);
+    }
+
+    #[test]
     fn test_pool_shutdown() {
         let count = Arc::new(AtomicU32::new(0));
         let pool = make_pool(3, count.clone());
