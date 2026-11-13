@@ -325,3 +325,41 @@ fn diag_flou_formes_de_segments() {
     eprintln!("formes rouges : {red}");
     let _ = content_field;
 }
+
+
+/// Reopen a saved index (DIAG_INDEX, a copy: opening it may write) and compare
+/// d=0 and d=1 by path, with the segment layout.
+#[test]
+#[ignore]
+fn diag_flou_index_sauve() {
+    let path = std::env::var("DIAG_INDEX").expect("DIAG_INDEX");
+    let dir = StdFsDirectory::open(std::path::Path::new(&path)).unwrap();
+    let handle = LucivyHandle::open(dir).unwrap();
+    let path_field = handle.field("path").unwrap();
+    let layout = || handle.reader.searcher().segment_readers().iter()
+        .map(|r| format!("{}:{}", r.segment_id().short_uuid_string(), r.num_docs())).collect::<Vec<_>>().join(",");
+    eprintln!("layout [{}]", layout());
+    for round in 0..3 {
+        let (d0, n0, ..) = paths_of(&handle, path_field, "rag3weaver", 0);
+        let (d1, n1, ..) = paths_of(&handle, path_field, "rag3weaver", 1);
+        let missing: Vec<_> = d0.difference(&d1).collect();
+        eprintln!("round {round}: d0 {} ({n0}) d1 {} ({n1}) missing {} {:?} layout [{}]",
+            d0.len(), d1.len(), missing.len(), missing.iter().take(8).collect::<Vec<_>>(), layout());
+    }
+    // Per segment: which segment holds each missing doc, and its doc ids.
+    let searcher = handle.reader.searcher();
+    for (ord, reader) in searcher.segment_readers().iter().enumerate() {
+        let store = reader.get_store_reader(1).unwrap();
+        let mut names = Vec::new();
+        for doc_id in 0..reader.max_doc() {
+            let doc: ld_lucivy::LucivyDocument = store.get(doc_id).unwrap();
+            let p: String = doc.get_first(path_field).map(|v| { let o: ld_lucivy::schema::OwnedValue = v.into(); match o { ld_lucivy::schema::OwnedValue::Str(s) => s, _ => String::new() } }).unwrap_or_default();
+            if p.starts_with("tools/build-images") || p.starts_with("tools/wasm/test/browser/rag3weaver") {
+                names.push(format!("{doc_id}={p}"));
+            }
+        }
+        if !names.is_empty() {
+            eprintln!("segment {ord} {} ({} docs): {:?}", reader.segment_id().short_uuid_string(), reader.max_doc(), names);
+        }
+    }
+}
