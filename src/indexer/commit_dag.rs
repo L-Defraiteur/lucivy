@@ -47,6 +47,8 @@ pub(crate) struct PrepareNode {
     shared: Arc<SegmentUpdaterShared>,
     merge_ops: Vec<MergeOperation>,
     opstamp: Opstamp,
+    /// A commit swaps uncommitted → committed; an explicit merge does not.
+    commit: bool,
 }
 
 impl PrepareNode {
@@ -54,9 +56,44 @@ impl PrepareNode {
         shared: Arc<SegmentUpdaterShared>,
         merge_ops: Vec<MergeOperation>,
         opstamp: Opstamp,
+        commit: bool,
     ) -> Self {
-        Self { shared, merge_ops, opstamp }
+        Self { shared, merge_ops, opstamp, commit }
     }
+}
+
+/// The entries of the segments a merge reads, when no commit takes place.
+///
+/// No segment changes register: committing the segments written since the
+/// last commit here would promote them without folding their texts into the
+/// shard dictionary (the commit folds them first, `fold_new_texts`). The next
+/// commit folds only the segments not yet committed, so it skipped them, and
+/// their minted pair was deleted as consumed — their words were in no
+/// generation, and a fuzzy `contains` dropped every document using them.
+/// The deletes up to `opstamp` are applied to the merged segments only.
+pub(crate) fn merge_entries_outside_commit(
+    shared: &SegmentUpdaterShared,
+    op: &MergeOperation,
+    opstamp: Opstamp,
+) -> crate::Result<Vec<SegmentEntry>> {
+    if shared.index.settings().sfx_version == crate::suffix_fst::dictionary::DICTIONARY_SFX_VERSION {
+        // A merged segment has no minted pair of its own: merging segments
+        // before their commit would lose the words they minted. The merge
+        // policy proposes committed segments only.
+        let committed: std::collections::HashSet<_> = shared.segment_manager
+            .committed_segment_metas().iter().map(|m| m.id()).collect();
+        if let Some(id) = op.segment_ids().iter().find(|id| !committed.contains(id)) {
+            return Err(crate::LucivyError::InvalidArgument(format!(
+                "segment {} is not committed yet: commit before merging it \
+                 (the shard dictionary takes its words at commit)", id.short_uuid_string())));
+        }
+    }
+    let mut entries = shared.segment_manager.start_merge(op.segment_ids())?;
+    for entry in &mut entries {
+        let segment = shared.index.segment(entry.meta().clone());
+        crate::indexer::index_writer::advance_deletes(segment, entry, opstamp)?;
+    }
+    Ok(entries)
 }
 
 impl Node for PrepareNode {
@@ -75,19 +112,23 @@ impl Node for PrepareNode {
     }
 
     fn execute(&mut self, ctx: &mut NodeContext) -> Result<(), String> {
-        // 1. Purge deletes (advance delete cursors to current opstamp)
-        let segment_entries = self.shared.purge_deletes(self.opstamp)
-            .map_err(|e| format!("purge_deletes: {e}"))?;
-        ctx.metric("purged_segments", segment_entries.len() as f64);
+        if self.commit {
+            // 1. Purge deletes (advance delete cursors to current opstamp)
+            let segment_entries = self.shared.purge_deletes(self.opstamp)
+                .map_err(|e| format!("purge_deletes: {e}"))?;
+            ctx.metric("purged_segments", segment_entries.len() as f64);
 
-        // 2. Commit segment manager (swap uncommitted → committed)
-        self.shared.segment_manager.commit(segment_entries);
+            // 2. Commit segment manager (swap uncommitted → committed)
+            self.shared.segment_manager.commit(segment_entries);
+        }
 
         // 3. Start each merge (lock segments in the manager)
         for (i, op) in self.merge_ops.iter().enumerate() {
-            let entries = self.shared.segment_manager
-                .start_merge(op.segment_ids())
-                .map_err(|e| format!("start_merge[{i}]: {e}"))?;
+            let entries = if self.commit {
+                self.shared.segment_manager.start_merge(op.segment_ids())
+            } else {
+                merge_entries_outside_commit(&self.shared, op, self.opstamp)
+            }.map_err(|e| format!("start_merge[{i}]: {e}"))?;
 
             self.shared.event_bus.emit(IndexEvent::MergeStarted {
                 segment_ids: op.segment_ids().to_vec(),
@@ -427,7 +468,8 @@ impl Node for ReloadNode {
 ///           └── merge_2 ──┘
 /// ```
 ///
-/// - prepare: purge_deletes + commit + start_merge (locks segments)
+/// - prepare: purge_deletes + commit + start_merge (locks segments); for an
+///   explicit merge (`commit: false`), start_merge only — no segment is promoted
 /// - merge_N: parallel merges via PollNode (cooperative)
 /// - finalize: end_merge for each, advance deletes
 /// - save_metas → gc → reload: sequential cleanup
@@ -436,12 +478,13 @@ pub(crate) fn build_commit_dag(
     merge_ops: Vec<MergeOperation>,
     opstamp: Opstamp,
     payload: Option<String>,
+    commit: bool,
 ) -> Result<Dag, String> {
     let mut dag = Dag::new();
     let num_merges = merge_ops.len();
 
     // Prepare: purge + commit + start all merges
-    dag.add_node("prepare", PrepareNode::new(shared.clone(), merge_ops, opstamp));
+    dag.add_node("prepare", PrepareNode::new(shared.clone(), merge_ops, opstamp, commit));
 
     if num_merges > 0 {
         // Parallel merge nodes
