@@ -394,6 +394,30 @@ mod destruction_tests {
     }
 
     #[test]
+    fn closing_drains_more_admitted_senders_than_channel_capacity() {
+        let (mailbox, actor_ref) = mailbox::<Arc<()>>(1);
+        let resource = Arc::new(());
+        actor_ref.send(resource.clone()).unwrap(); // Fill before any receiver runs.
+        std::thread::scope(|scope| {
+            let mut sending = Vec::new();
+            for _ in 0..3 {
+                let admitted = actor_ref.completion.begin_send().unwrap();
+                let sender = actor_ref.sender.clone();
+                let payload = resource.clone();
+                sending.push(scope.spawn(move || {
+                    let result = sender.send(payload);
+                    drop(admitted);
+                    result
+                }));
+            }
+            drop(mailbox);
+            for thread in sending { thread.join().unwrap().unwrap(); }
+        });
+        actor_ref.wait_stopped(&crate::Scheduler::new(1), "all_admitted_destroyed").unwrap();
+        assert_eq!(Arc::strong_count(&resource), 1);
+    }
+
+    #[test]
     fn panicking_message_drop_waits_for_admitted_send() {
         use std::sync::mpsc;
         use std::time::Duration;
