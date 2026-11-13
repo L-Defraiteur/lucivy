@@ -606,9 +606,10 @@ mod tests {
         }));
         let pool = Pool::spawn(1, 16, |_| worker.lock().unwrap().take().unwrap());
         let (returned_tx, returned_rx) = mpsc::channel();
+        let caller_resource = resource.clone();
         let shutdown = std::thread::spawn(move || {
             pool.shutdown("shutdown_drop_gate");
-            returned_tx.send(Arc::strong_count(&resource)).unwrap();
+            returned_tx.send(Arc::strong_count(&caller_resource)).unwrap();
         });
 
         let entered = entered_rx.recv_timeout(Duration::from_secs(5));
@@ -627,7 +628,8 @@ mod tests {
             matches!(early, Some(Err(mpsc::RecvTimeoutError::Timeout))),
             "shutdown returned before worker destruction: {early:?}"
         );
-        assert_eq!(returned_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+        assert_eq!(returned_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+        assert_eq!(Arc::strong_count(&resource), 1);
     }
 
     #[test]
