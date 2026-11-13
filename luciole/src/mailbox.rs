@@ -351,7 +351,7 @@ mod destruction_tests {
             fn drop(&mut self) { assert!(self.0.try_send(None).is_err()); }
         }
         let (mailbox, actor_ref) = mailbox(1);
-        actor_ref.send(Some(Box::new(Pending(actor_ref.clone())))).unwrap();
+        assert!(actor_ref.send(Some(Box::new(Pending(actor_ref.clone())))).is_ok());
         drop(mailbox);
         actor_ref.wait_stopped(&crate::Scheduler::new(1), "reentrant_drop").unwrap();
     }

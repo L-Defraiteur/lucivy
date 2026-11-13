@@ -1534,8 +1534,8 @@ mod tests {
         let (mailbox, mut actor_ref) = crate::mailbox(8);
         scheduler.spawn(Owner(owned.clone()), mailbox, &mut actor_ref, 8);
         let (ack, response) = crate::reply();
-        actor_ref.send(Msg::Stop(crate::ShutdownMsg(ack))).unwrap();
-        actor_ref.send(Msg::Pending(pending.clone())).unwrap();
+        assert!(actor_ref.send(Msg::Stop(crate::ShutdownMsg(ack))).is_ok());
+        assert!(actor_ref.send(Msg::Pending(pending.clone())).is_ok());
         // Start workers only after the mailbox has both messages.
         let _workers = if num_threads > 1 { Some(scheduler.start()) } else { None };
         scheduler.try_wait(response, "stop_ack").unwrap();
@@ -1570,7 +1570,7 @@ mod tests {
         let (mailbox, mut actor_ref) = crate::mailbox(1);
         scheduler.spawn_pinned(SelfJoin { myself: actor_ref.clone() }, mailbox, &mut actor_ref, 1);
         let (tx, rx) = crate::reply();
-        actor_ref.send(tx).unwrap();
+        assert!(actor_ref.send(tx).is_ok());
         assert!(scheduler.try_wait(rx, "self_join_rejected").unwrap());
         actor_ref.wait_stopped(&scheduler, "pinned_destroyed").unwrap();
     }
