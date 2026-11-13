@@ -234,3 +234,94 @@ fn diag_flou_monotonie() {
     eprintln!("rounds red: {red}/6");
     let _ = content_field;
 }
+
+
+fn check(handle: &LucivyHandle, path_field: ld_lucivy::schema::Field,
+         files: &[(String, String)], truth: &std::collections::BTreeSet<String>, label: &str) -> bool {
+    let (d0, n0, ..) = paths_of(handle, path_field, "rag3weaver", 0);
+    let (d1, n1, ..) = paths_of(handle, path_field, "rag3weaver", 1);
+    let segs = handle.reader.searcher().segment_readers().iter()
+        .map(|r| r.num_docs().to_string()).collect::<Vec<_>>().join(",");
+    let missing: Vec<_> = d0.difference(&d1).cloned().chain(truth.difference(&d1).cloned())
+        .collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    eprintln!("{label}: d0 {} ({n0}) d1 {} ({n1}) missing {} | segments [{segs}]", d0.len(), d1.len(), missing.len());
+    for p in missing.iter().take(10) {
+        let content = &files.iter().find(|(q, _)| q == p).unwrap().1;
+        let lower = content.to_lowercase();
+        let pos: Vec<usize> = lower.match_indices("rag3weaver").map(|(i, _)| i).take(3).collect();
+        let ctx: Vec<String> = pos.iter().map(|&i| {
+            let s = (0..=i.saturating_sub(12)).rev().find(|&k| content.is_char_boundary(k)).unwrap_or(0);
+            let e = (i + 22..=content.len()).find(|&k| content.is_char_boundary(k)).unwrap_or(content.len());
+            content[s..e].replace('\n', "\\n")
+        }).collect();
+        eprintln!("    {p} len={} occ={} at {:?} ctx={:?}", content.len(), lower.matches("rag3weaver").count(), pos, ctx);
+    }
+    missing.is_empty()
+}
+
+#[test]
+#[ignore]
+fn diag_flou_formes_de_segments() {
+    let files = collect_repo_files();
+    let tmp_path = std::path::Path::new("/tmp/diag_flou_formes");
+    let _ = std::fs::remove_dir_all(tmp_path);
+    std::fs::create_dir_all(tmp_path).unwrap();
+    let config = SchemaConfig {
+        fields: vec![
+            query::FieldDef { name: "path".into(), field_type: "text".into(),
+                stored: Some(true), indexed: Some(false), fast: None },
+            query::FieldDef { name: "content".into(), field_type: "text".into(),
+                stored: Some(true), indexed: Some(true), fast: None },
+        ],
+        ..Default::default()
+    };
+    let dir = StdFsDirectory::open(tmp_path).unwrap();
+    let handle = LucivyHandle::create(dir, &config).unwrap();
+    let path_field = handle.field("path").unwrap();
+    let content_field = handle.field("content").unwrap();
+    {
+        let mut guard = handle.writer.lock().unwrap();
+        let writer = guard.as_mut().unwrap();
+        // No background merge: the layouts below are made by hand.
+        writer.set_merge_policy(Box::new(ld_lucivy::indexer::NoMergePolicy));
+        for (i, (path, content)) in files.iter().enumerate() {
+            let mut doc = ld_lucivy::LucivyDocument::new();
+            doc.add_text(path_field, path);
+            doc.add_text(content_field, content);
+            writer.add_document(doc).unwrap();
+            if (i + 1) % COMMIT_EVERY == 0 { writer.commit().unwrap(); }
+        }
+        writer.commit().unwrap();
+    }
+    handle.reader.reload().unwrap();
+    let truth: std::collections::BTreeSet<String> = files.iter()
+        .filter(|(_, c)| c.to_lowercase().contains("rag3weaver"))
+        .map(|(p, _)| p.clone()).collect();
+    let mut red = 0;
+    if !check(&handle, path_field, &files, &truth, "sans fusion") { red += 1; }
+    for k in 2..=6usize {
+        let ids = handle.index.searchable_segment_ids().unwrap();
+        let groups: Vec<Vec<_>> = ids.chunks(k).filter(|c| c.len() > 1).map(|c| c.to_vec()).collect();
+        {
+            let mut guard = handle.writer.lock().unwrap();
+            let writer = guard.as_mut().unwrap();
+            writer.merge_many(&groups).unwrap();
+            writer.commit().unwrap();
+        }
+        handle.reader.reload().unwrap();
+        handle.wait_dictionary_fold();
+        if !check(&handle, path_field, &files, &truth, &format!("fusion par {k}")) { red += 1; }
+    }
+    {
+        let ids = handle.index.searchable_segment_ids().unwrap();
+        let mut guard = handle.writer.lock().unwrap();
+        let writer = guard.as_mut().unwrap();
+        writer.merge(&ids).unwrap();
+        writer.commit().unwrap();
+    }
+    handle.reader.reload().unwrap();
+    handle.wait_dictionary_fold();
+    if !check(&handle, path_field, &files, &truth, "un seul segment") { red += 1; }
+    eprintln!("formes rouges : {red}");
+    let _ = content_field;
+}
