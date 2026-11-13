@@ -119,7 +119,6 @@ impl<M> Drop for Mailbox<M> {
             state = completion.sends_changed.wait(state).unwrap();
             drop(state);
         }
-        drop(discard);
         // CompletionGuard is dropped during this unwind only AFTER active=0
         // and an empty queue. Preserve an existing unwind rather than aborting
         // with a second panic from cleanup.
