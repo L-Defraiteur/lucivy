@@ -2,7 +2,13 @@
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. From C++. Runs in your process, in your transaction (`lucivy::BlobBackend`), and the same engine runs in the browser. Powered by Rust via a CXX bridge, MIT.
 
-Version 4.3.4 — the lucivy engine of the same number (SFX v3 suffix index, the shared dictionary by default).
+Version 4.3.5 — the lucivy engine of the same number (SFX v3 suffix index, the shared dictionary by default).
+
+### What's new in 4.3.5
+
+A patch release with one fix. The index format is unchanged, but **an index built while background merges ran between commits may have lost words: rebuild it** (see the changelog).
+
+- **No more documents silently missing from results.** A background merge that started between two commits made the segments written since the last commit look committed, so their new words were never added to the shard dictionary and were then deleted. Documents using those words dropped out of fuzzy searches entirely, and out of exact searches for the words only they contained. New words are now always kept.
 
 ### What's new in 4.3.4
 
