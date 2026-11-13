@@ -185,6 +185,28 @@ fn diag_flou_monotonie() {
         .filter(|(_, c)| c.to_lowercase().contains("rag3weaver"))
         .map(|(p, _)| p.clone()).collect();
     eprintln!("truth: {} files contain rag3weaver (case-insensitive)", truth.len());
+    // The original test's queries, in its order, before its monotonicity check.
+    if std::env::var("DIAG_PREAMBLE").is_ok_and(|v| v == "1") {
+        let cases: Vec<(&str, u8)> = vec![
+            ("rag3weaver", 0), ("rag3weaver", 1), ("rak3weaver", 1), ("rag3db", 1),
+            ("Build rag3weaver Rust static lib for WASM emscripten Only used in WASM builds Native", 0),
+            ("Build rag3weaver Rust static lib for WASM emscripten Only used in WASM builds Native", 1),
+        ];
+        for (q, d) in cases {
+            let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
+            let qconfig = QueryConfig {
+                query_type: "contains".into(), field: Some("content".into()),
+                value: Some(q.to_string()), distance: Some(d), ..Default::default()
+            };
+            let r = handle.search(&qconfig, 20, Some(sink)).unwrap();
+            eprintln!("preamble {q:.30} d={d}: {} hits", r.len());
+            if std::env::var("DIAG_CHECK_EACH").is_ok_and(|v| v == "1") {
+                let (d0, ..) = paths_of(&handle, path_field, "rag3weaver", 0);
+                let (d1, ..) = paths_of(&handle, path_field, "rag3weaver", 1);
+                eprintln!("  after it: rag3weaver d0 {} d1 {}", d0.len(), d1.len());
+            }
+        }
+    }
     let mut red = 0;
     for round in 0..6 {
         let (d0, n0, b0, a0) = paths_of(&handle, path_field, "rag3weaver", 0);
