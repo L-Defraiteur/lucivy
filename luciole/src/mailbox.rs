@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use flume as channel;
 
@@ -8,12 +8,28 @@ use super::scheduler::SchedulerNotifier;
 
 /// Completion shared by all references, independent of the shutdown protocol.
 /// A reply is delivered only after the receiver and owning actor are dropped.
+struct SendState { closing: bool, active: usize }
+
 struct Completion {
+    sends: Mutex<SendState>,
+    sends_changed: Condvar,
     waiters: Mutex<Option<Vec<crate::Reply<()>>>>,
 }
 
 impl Completion {
-    fn new() -> Self { Self { waiters: Mutex::new(Some(Vec::new())) } }
+    fn new() -> Self {
+        Self {
+            sends: Mutex::new(SendState { closing: false, active: 0 }),
+            sends_changed: Condvar::new(),
+            waiters: Mutex::new(Some(Vec::new())),
+        }
+    }
+    fn begin_send(self: &Arc<Self>) -> Option<SendGuard> {
+        let mut state = self.sends.lock().unwrap();
+        if state.closing { return None; }
+        state.active += 1;
+        Some(SendGuard(self.clone()))
+    }
     fn subscribe(&self) -> crate::ReplyReceiver<()> {
         let (tx, rx) = crate::reply();
         let mut state = self.waiters.lock().unwrap();
@@ -32,6 +48,15 @@ impl Completion {
     }
 }
 
+struct SendGuard(Arc<Completion>);
+impl Drop for SendGuard {
+    fn drop(&mut self) {
+        let mut state = self.0.sends.lock().unwrap();
+        state.active -= 1;
+        self.0.sends_changed.notify_all();
+    }
+}
+
 struct CompletionGuard(Arc<Completion>);
 impl Drop for CompletionGuard {
     fn drop(&mut self) { self.0.finish(); }
@@ -42,6 +67,33 @@ pub struct Mailbox<M> {
     pub(super) receiver: channel::Receiver<M>,
     // Last: pending messages/receiver must be destroyed before completion.
     _completion: CompletionGuard,
+}
+
+impl<M> Drop for Mailbox<M> {
+    fn drop(&mut self) {
+        let completion = &self._completion.0;
+        completion.sends.lock().unwrap().closing = true;
+        loop {
+            // Free bounded-channel slots so sends admitted before closing can
+            // finish. Drop messages outside our locks: their destructors may
+            // send to other actors (or attempt a now-rejected send to this one).
+            let pending: Vec<_> = self.receiver.drain().collect();
+            drop(pending);
+            let mut state = completion.sends.lock().unwrap();
+            if state.active == 0 {
+                drop(state);
+                // No admitted sender remains and no new sender can enter.
+                let remaining: Vec<_> = self.receiver.drain().collect();
+                drop(remaining);
+                break;
+            }
+            if !self.receiver.is_empty() { continue; }
+            // A sender will either fill the empty queue and finish, or finish
+            // without sending. Its guard wakes us; no polling or sleep.
+            state = completion.sends_changed.wait(state).unwrap();
+            drop(state);
+        }
+    }
 }
 
 impl<M> Mailbox<M> {
@@ -110,6 +162,10 @@ impl<M> ActorRef<M> {
     }
 
     pub fn send(&self, msg: M) -> Result<(), channel::SendError<M>> {
+        let _send = match self.completion.begin_send() {
+            Some(guard) => guard,
+            None => return Err(channel::SendError(msg)),
+        };
         self.sender.send(msg)?;
         if let Some(wh) = &self.notifier {
             if wh.is_idle.swap(false, Ordering::AcqRel) {
@@ -211,6 +267,10 @@ impl<M> ActorRef<M> {
     }
 
     pub fn try_send(&self, msg: M) -> Result<(), channel::TrySendError<M>> {
+        let _send = match self.completion.begin_send() {
+            Some(guard) => guard,
+            None => return Err(channel::TrySendError::Disconnected(msg)),
+        };
         self.sender.try_send(msg)?;
         if let Some(wh) = &self.notifier {
             if wh.is_idle.swap(false, Ordering::AcqRel) {
@@ -254,4 +314,45 @@ pub fn mailbox<M>(capacity: usize) -> (Mailbox<M>, ActorRef<M>) {
 
 pub(super) fn attach_wake_handle<M>(actor_ref: &mut ActorRef<M>, handle: Arc<WakeHandle>) {
     actor_ref.notifier = Some(handle);
+}
+
+#[cfg(test)]
+mod destruction_tests {
+    use super::*;
+
+    #[test]
+    fn completion_drains_admitted_send_and_rejects_new_sends() {
+        let (mailbox, actor_ref) = mailbox::<Arc<()>>(1);
+        let resource = Arc::new(());
+        actor_ref.send(resource.clone()).unwrap();
+        // Freeze an admitted send before its potentially blocking flume send.
+        // This is the same guard held by ActorRef::send across flume.send.
+        let admitted = actor_ref.completion.begin_send().unwrap();
+        let sender = actor_ref.sender.clone();
+        let payload = resource.clone();
+        let sending = std::thread::spawn(move || {
+            let result = sender.send(payload);
+            drop(admitted);
+            result
+        });
+        drop(mailbox);
+        sending.join().unwrap().unwrap();
+        actor_ref.wait_stopped(&crate::Scheduler::new(1), "mailbox_destroyed").unwrap();
+        assert_eq!(Arc::strong_count(&resource), 1);
+        assert!(actor_ref.send(resource.clone()).is_err());
+        assert!(actor_ref.try_send(resource.clone()).is_err());
+        assert_eq!(Arc::strong_count(&resource), 1);
+    }
+
+    #[test]
+    fn pending_destructor_can_reenter_closed_mailbox() {
+        struct Pending(ActorRef<Option<Box<Pending>>>);
+        impl Drop for Pending {
+            fn drop(&mut self) { assert!(self.0.try_send(None).is_err()); }
+        }
+        let (mailbox, actor_ref) = mailbox(1);
+        actor_ref.send(Some(Box::new(Pending(actor_ref.clone())))).unwrap();
+        drop(mailbox);
+        actor_ref.wait_stopped(&crate::Scheduler::new(1), "reentrant_drop").unwrap();
+    }
 }
