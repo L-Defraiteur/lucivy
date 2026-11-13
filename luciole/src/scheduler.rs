@@ -395,6 +395,7 @@ trait AnyActor: Send {
 }
 
 struct ActorWrapper<A: Actor> {
+    // Field order is a lifecycle guarantee: actor drops before mailbox/completion.
     actor: A,
     mailbox: Mailbox<A::Msg>,
 }
@@ -639,7 +640,7 @@ impl Scheduler {
 
         actor.on_start(actor_ref.clone());
 
-        let receiver = mailbox.receiver.clone();
+        let mut wrapper = ActorWrapper { actor, mailbox };
         let shared = Arc::clone(&self.shared);
 
         std::thread::Builder::new()
@@ -655,9 +656,9 @@ impl Scheduler {
                     if shared.shutdown.load(Ordering::Acquire) {
                         return;
                     }
-                    match receiver.recv() {
+                    match wrapper.mailbox.receiver.recv() {
                         Ok(msg) => {
-                            let status = actor.handle(msg, &ctx);
+                            let status = wrapper.actor.handle(msg, &ctx);
                             match status {
                                 ActorStatus::Stop => return,
                                 ActorStatus::Yield | ActorStatus::Continue => {}
@@ -1491,6 +1492,49 @@ mod tests {
     use super::super::*;
     use super::*;
     use std::sync::atomic::AtomicU32;
+
+    // Exercise both dispatch paths. A queued message owns a second resource:
+    // completion must cover mailbox destruction as well as the actor itself.
+    fn destruction_completion(num_threads: usize) {
+        struct Owner(Arc<()>);
+        enum Msg { Stop(crate::ShutdownMsg), Pending(Arc<()>) }
+        impl Actor for Owner {
+            type Msg = Msg;
+            fn name(&self) -> &'static str { "destruction_completion" }
+            fn priority(&self) -> Priority { Priority::Medium }
+            fn handle(&mut self, msg: Msg, _ctx: &ActorContext) -> ActorStatus {
+                match msg {
+                    Msg::Stop(ack) => { ack.ack(); ActorStatus::Stop }
+                    Msg::Pending(resource) => { drop(resource); ActorStatus::Continue }
+                }
+            }
+        }
+        impl Drop for Owner {
+            fn drop(&mut self) { assert!(Arc::strong_count(&self.0) >= 2); }
+        }
+        let scheduler = Scheduler::new(num_threads);
+        let owned = Arc::new(());
+        let pending = Arc::new(());
+        let (mailbox, mut actor_ref) = crate::mailbox(8);
+        scheduler.spawn(Owner(owned.clone()), mailbox, &mut actor_ref, 8);
+        let (ack, response) = crate::reply();
+        actor_ref.send(Msg::Stop(crate::ShutdownMsg(ack))).unwrap();
+        actor_ref.send(Msg::Pending(pending.clone())).unwrap();
+        // Start workers only after the mailbox has both messages.
+        let _workers = if num_threads > 1 { Some(scheduler.start()) } else { None };
+        scheduler.try_wait(response, "stop_ack").unwrap();
+        actor_ref.wait_stopped(&scheduler, "destroyed").unwrap();
+        assert_eq!(Arc::strong_count(&owned), 1);
+        assert_eq!(Arc::strong_count(&pending), 1);
+        actor_ref.wait_stopped(&scheduler, "destroyed_again").unwrap();
+        assert!(actor_ref.send(Msg::Pending(pending.clone())).is_err());
+    }
+
+    #[test]
+    fn destruction_completion_cooperative() { destruction_completion(1); }
+
+    #[test]
+    fn destruction_completion_worker() { destruction_completion(2); }
 
     struct Counter {
         count: u32,
