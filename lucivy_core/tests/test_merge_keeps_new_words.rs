@@ -35,8 +35,14 @@ fn contents(handle: &LucivyHandle, value: &str, distance: u8) -> BTreeSet<String
 }
 
 #[test]
-fn a_merge_between_commits_keeps_the_new_segments_words() {
-    let path = std::env::temp_dir().join(format!("lucivy-merge-new-words-{}", std::process::id()));
+fn a_merge_between_commits_keeps_the_new_segments_words() { run(true) }
+
+/// The same path without the merge: the witness of the witness.
+#[test]
+fn without_a_merge_the_new_segments_words_are_found() { run(false) }
+
+fn run(merge: bool) {
+    let path = std::env::temp_dir().join(format!("lucivy-merge-new-words-{}-{merge}", std::process::id()));
     let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir_all(&path).unwrap();
     let config = SchemaConfig {
@@ -68,9 +74,11 @@ fn a_merge_between_commits_keeps_the_new_segments_words() {
         }
         drop(writer.prepare_commit().unwrap());
         // A merge of the committed segments starts between the two commits.
-        let committed = handle.index.searchable_segment_ids().unwrap();
-        assert!(committed.len() >= 2, "two committed segments to merge, got {}", committed.len());
-        writer.merge(&committed).unwrap();
+        if merge {
+            let committed = handle.index.searchable_segment_ids().unwrap();
+            assert!(committed.len() >= 2, "two committed segments to merge, got {}", committed.len());
+            writer.merge(&committed).unwrap();
+        }
         writer.commit().unwrap();
         drop(guard);
         handle.reader.reload().unwrap();
