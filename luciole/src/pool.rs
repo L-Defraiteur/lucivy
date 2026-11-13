@@ -195,6 +195,7 @@ impl<M: Send + 'static> Pool<M> {
     where
         M: From<ShutdownMsg>,
     {
+        assert!(!crate::scheduler::in_actor_handler(), "cannot shut down a pool inside an actor handler");
         let scheduler = global_scheduler();
         let mut receivers = Vec::with_capacity(self.workers.len());
 
@@ -207,6 +208,11 @@ impl<M: Send + 'static> Pool<M> {
 
         for rx in receivers {
             let _ = scheduler.try_wait(rx, label);
+        }
+        // Acknowledgement precedes Stop. Join actual destruction for every
+        // worker, including one whose shutdown send failed or reply was lost.
+        for worker in &self.workers {
+            worker.wait_stopped(scheduler, label).expect("pool destruction wait rejected");
         }
     }
 

@@ -3198,6 +3198,7 @@ impl ShardedHandle {
         if self.router_ref.send(luciole::ShutdownMsg(router_stopped).into()).is_ok() {
             let _ = global_scheduler().try_wait(router_rx, "close_router");
         }
+        self.router_ref.wait_stopped(global_scheduler(), "close_router_destroyed")?;
         self.shard_pool.shutdown("close_shards");
         self.closed.store(true, Ordering::Release);
         match first_error {

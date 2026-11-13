@@ -1,14 +1,47 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use flume as channel;
 
 use super::events::{EventBus, SchedulerEvent};
 use super::scheduler::SchedulerNotifier;
 
+/// Completion shared by all references, independent of the shutdown protocol.
+/// A reply is delivered only after the receiver and owning actor are dropped.
+struct Completion {
+    waiters: Mutex<Option<Vec<crate::Reply<()>>>>,
+}
+
+impl Completion {
+    fn new() -> Self { Self { waiters: Mutex::new(Some(Vec::new())) } }
+    fn subscribe(&self) -> crate::ReplyReceiver<()> {
+        let (tx, rx) = crate::reply();
+        let mut state = self.waiters.lock().unwrap();
+        if let Some(waiters) = state.as_mut() {
+            waiters.push(tx);
+        } else {
+            drop(state);
+            tx.send(());
+        }
+        rx
+    }
+    fn finish(&self) {
+        let waiters = self.waiters.lock().unwrap().take().unwrap_or_default();
+        // Never run reply callbacks under the lifecycle mutex.
+        for waiter in waiters { waiter.send(()); }
+    }
+}
+
+struct CompletionGuard(Arc<Completion>);
+impl Drop for CompletionGuard {
+    fn drop(&mut self) { self.0.finish(); }
+}
+
 /// Côté réception d'un acteur. FIFO strict.
 pub struct Mailbox<M> {
     pub(super) receiver: channel::Receiver<M>,
+    // Last: pending messages/receiver must be destroyed before completion.
+    _completion: CompletionGuard,
 }
 
 impl<M> Mailbox<M> {
@@ -38,6 +71,7 @@ impl<M> Mailbox<M> {
 /// Handle pour envoyer des messages à un acteur. Clonable.
 pub struct ActorRef<M> {
     sender: channel::Sender<M>,
+    completion: Arc<Completion>,
     notifier: Option<Arc<WakeHandle>>,
 }
 
@@ -57,12 +91,24 @@ impl<M> Clone for ActorRef<M> {
     fn clone(&self) -> Self {
         ActorRef {
             sender: self.sender.clone(),
+            completion: self.completion.clone(),
             notifier: self.notifier.clone(),
         }
     }
 }
 
 impl<M> ActorRef<M> {
+    /// Wait for destruction, not merely a shutdown acknowledgement.
+    /// The scheduler parameter also supports local cooperative schedulers.
+    /// Waiting from an actor handler is forbidden (including self-join).
+    pub fn wait_stopped(&self, scheduler: &crate::Scheduler, label: &str) -> Result<(), String> {
+        if crate::scheduler::in_actor_handler() {
+            return Err("cannot wait for actor destruction inside a handler".into());
+        }
+        scheduler.try_wait(self.completion.subscribe(), label)
+            .map_err(|_| format!("actor completion lost ({label})"))
+    }
+
     pub fn send(&self, msg: M) -> Result<(), channel::SendError<M>> {
         self.sender.send(msg)?;
         if let Some(wh) = &self.notifier {
@@ -195,10 +241,12 @@ pub fn mailbox<M>(capacity: usize) -> (Mailbox<M>, ActorRef<M>) {
     } else {
         channel::bounded(capacity)
     };
+    let completion = Arc::new(Completion::new());
     (
-        Mailbox { receiver },
+        Mailbox { receiver, _completion: CompletionGuard(completion.clone()) },
         ActorRef {
             sender,
+            completion,
             notifier: None,
         },
     )
