@@ -279,16 +279,37 @@ impl SegmentUpdaterState {
         // racing the policy's) must still answer the waiter: an unanswered
         // request is a panic on its side ("actor died without replying").
         let prepare = |this: &mut Self| -> crate::Result<Vec<(MergeOperation, Vec<SegmentEntry>)>> {
-            let segment_entries = this.shared.purge_deletes(opstamp)?;
-            this.shared.segment_manager.commit(segment_entries);
+            // Not a commit: no segment changes register here. Committing every
+            // entry, as the commit's PrepareNode does, promoted the segments
+            // written since the last commit without folding their texts into
+            // the shard dictionary; the next commit folds only the segments
+            // not yet committed, so it skipped them, and their minted pair was
+            // deleted as consumed — their words were in no generation.
             this.refuse_if_merging(&batch_ids)?;
+            if this.shared.index.settings().sfx_version == crate::suffix_fst::dictionary::DICTIONARY_SFX_VERSION {
+                // A merged segment has no minted pair of its own: merging
+                // segments before their commit would lose the words they
+                // minted. The policy proposes committed segments only.
+                let committed: std::collections::HashSet<_> = this.shared.segment_manager
+                    .committed_segment_metas().iter().map(|m| m.id()).collect();
+                if let Some(id) = batch_ids.iter().find(|id| !committed.contains(id)) {
+                    return Err(crate::LucivyError::InvalidArgument(format!(
+                        "segment {} is not committed yet: commit before merging it \
+                         (the shard dictionary takes its words at commit)", id.short_uuid_string())));
+                }
+            }
             // Validate every operation before marking anything: a plan made
             // a moment ago can name a segment a cascade has merged away, and
             // marking the earlier operations' segments before that failure
             // left them "in merge" forever (no batch would ever release them).
             let mut prepared: Vec<(MergeOperation, Vec<SegmentEntry>)> = Vec::new();
             for op in &merge_ops {
-                let entries = this.shared.segment_manager.start_merge(op.segment_ids())?;
+                let mut entries = this.shared.segment_manager.start_merge(op.segment_ids())?;
+                // The deletes up to now, for the segments this merge reads only.
+                for entry in &mut entries {
+                    let segment = this.shared.index.segment(entry.meta().clone());
+                    crate::indexer::index_writer::advance_deletes(segment, entry, opstamp)?;
+                }
                 prepared.push((MergeOperation::new(op.target_opstamp(), op.segment_ids().to_vec()), entries));
             }
             for op in &merge_ops {
