@@ -9,12 +9,18 @@ import { mkdirSync, rmSync } from 'fs';
 const testDir = join(tmpdir(), 'lucivy_node_test_' + Date.now());
 mkdirSync(testDir, { recursive: true });
 
+// Every index this test opens, closed before its directory is removed: an
+// open index may still be merging or folding its dictionary after a commit,
+// and a file written during the removal made `rmSync` fail (ENOTEMPTY).
+const opened = [];
+const track = (index) => { opened.push(index); return index; };
+
 try {
     // 1. Create index
-    const idx = Index.create(testDir, [
+    const idx = track(Index.create(testDir, [
         { name: 'title', type: 'text' },
         { name: 'body', type: 'text' },
-    ]);
+    ]));
 
     console.log('Created index at:', idx.path);
     console.log('Schema:', idx.schema);
@@ -99,10 +105,10 @@ try {
     console.log('\n--- Snapshot: export/import roundtrip ---');
     const snapDir1 = join(testDir, 'snap_src');
     mkdirSync(snapDir1, { recursive: true });
-    const si = Index.create(snapDir1, [
+    const si = track(Index.create(snapDir1, [
         { name: 'title', type: 'text' },
         { name: 'body', type: 'text' },
-    ]);
+    ]));
     si.add(0, { title: 'Snapshot test', body: 'This is a snapshot roundtrip test' });
     si.add(1, { title: 'Second doc', body: 'Another document for testing' });
     si.commit();
@@ -114,7 +120,7 @@ try {
     console.log('Snapshot size:', blob.length, 'bytes');
 
     const snapDir2 = join(testDir, 'snap_dst');
-    const si2 = Index.importSnapshot(blob, snapDir2);
+    const si2 = track(Index.importSnapshot(blob, snapDir2));
     if (si2.numDocs !== 2) {
         throw new Error('FAIL: expected 2 docs after import, got ' + si2.numDocs);
     }
@@ -129,7 +135,7 @@ try {
     const snapFile = join(testDir, 'test.luce');
     si.exportSnapshotTo(snapFile);
     const snapDir3 = join(testDir, 'snap_file_dst');
-    const si3 = Index.importSnapshotFrom(snapFile, snapDir3);
+    const si3 = track(Index.importSnapshotFrom(snapFile, snapDir3));
     if (si3.numDocs !== 2) {
         throw new Error('FAIL: expected 2 docs from file import, got ' + si3.numDocs);
     }
@@ -139,10 +145,10 @@ try {
     console.log('\n--- Sharded index (2 shards) ---');
     const shardDir = join(testDir, 'sharded');
     mkdirSync(shardDir, { recursive: true });
-    const sidx = Index.create(shardDir, [
+    const sidx = track(Index.create(shardDir, [
         { name: 'title', type: 'text' },
         { name: 'body', type: 'text' },
-    ], 2);
+    ], 2));
     for (let i = 0; i < 20; i++) {
         sidx.add(i, { title: `Doc ${i}`, body: `Content for document number ${i} about programming` });
     }
@@ -156,7 +162,7 @@ try {
     // sharded snapshot round-trip
     const ssnap = sidx.exportSnapshot();
     const shardSnapDir = join(testDir, 'sharded_snap');
-    const sidx2 = Index.importSnapshot(ssnap, shardSnapDir);
+    const sidx2 = track(Index.importSnapshot(ssnap, shardSnapDir));
     if (sidx2.numDocs !== 20) throw new Error(`FAIL: sharded snapshot expected 20, got ${sidx2.numDocs}`);
     const sr2 = sidx2.search('programming');
     if (sr2.length < 1) throw new Error('FAIL: sharded snapshot search found nothing');
@@ -169,7 +175,7 @@ try {
     if (existsSync(lucePath)) {
         const luceData = readFileSync(lucePath);
         const playDir = join(testDir, 'playground_import');
-        const pidx = Index.importSnapshot(luceData, playDir);
+        const pidx = track(Index.importSnapshot(luceData, playDir));
         if (pidx.numDocs < 1) throw new Error('FAIL: playground snapshot has 0 docs');
         const pr = pidx.search({ type: 'contains', field: 'content', value: 'function' });
         if (pr.length < 1) throw new Error('FAIL: playground search found nothing');
@@ -180,5 +186,8 @@ try {
 
     console.log('\nAll tests passed!');
 } finally {
+    for (const index of opened) {
+        try { index.close(); } catch (e) { console.error('close:', e.message); }
+    }
     rmSync(testDir, { recursive: true, force: true });
 }
