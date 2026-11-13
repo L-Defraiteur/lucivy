@@ -241,8 +241,8 @@ impl fmt::Debug for State {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "State {{")?;
         writeln!(f, "  is_match: {:?}", self.is_match)?;
-        for i in 0..256 {
-            if let Some(si) = self.next[i] {
+        for (i, next) in self.next.iter().enumerate() {
+            if let Some(si) = next {
                 writeln!(f, "  {i:?}: {si:?}")?;
             }
         }
@@ -381,9 +381,10 @@ impl DfaBuilder {
         to: usize,
         range: &Utf8Range,
     ) {
-        for b in range.start as usize..range.end as usize + 1 {
-            if overwrite || self.dfa.states[from].next[b].is_none() {
-                self.dfa.states[from].next[b] = Some(to);
+        let bytes = range.start as usize..=range.end as usize;
+        for next in &mut self.dfa.states[from].next[bytes] {
+            if overwrite || next.is_none() {
+                *next = Some(to);
             }
         }
     }
