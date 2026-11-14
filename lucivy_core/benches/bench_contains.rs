@@ -1,6 +1,9 @@
 //! Benchmark: index rag3db clone and time contains_split queries.
 //! Run with: cargo test -p lucivy-core --test bench_contains -- --nocapture
 
+#[path = "../tests/common/mod.rs"]
+mod common;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -12,9 +15,9 @@ use lucivy_core::snapshot;
 use ld_lucivy::collector::TopDocs;
 use ld_lucivy::query::HighlightSink;
 
-const RAG3DB_CLONE: &str = "/tmp/rag3db_bench";
-const INDEX_DIR: &str = "/tmp/lucivy_bench_index";
-const LUCE_FILE: &str = "/tmp/lucivy_bench_rag3db.luce";
+// The corpus is the rag3db clone when present (`common::rag3db_clone_if_present`); the index goes to a scratch directory;
+// the .luce is kept for reuse under `common::report_path` (not in /tmp).
+const LUCE_FILE: &str = "lucivy_bench_rag3db.luce";
 const MAX_FILE_SIZE: u64 = 100_000;
 
 fn is_text(path: &Path) -> bool {
@@ -56,9 +59,7 @@ fn collect_files(root: &Path) -> Vec<(String, String)> {
     files
 }
 
-fn create_index(files: &[(String, String)]) -> LucivyHandle {
-    let _ = std::fs::remove_dir_all(INDEX_DIR);
-    std::fs::create_dir_all(INDEX_DIR).unwrap();
+fn create_index(files: &[(String, String)], index_dir: &str) -> LucivyHandle {
 
     let config: query::SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [
@@ -67,7 +68,7 @@ fn create_index(files: &[(String, String)]) -> LucivyHandle {
         ]
     })).unwrap();
 
-    let dir = StdFsDirectory::open(INDEX_DIR).unwrap();
+    let dir = StdFsDirectory::open(index_dir).unwrap();
     let handle = LucivyHandle::create(dir, &config).unwrap();
 
     let path_field = handle.field("path").unwrap();
@@ -121,22 +122,29 @@ fn time_query(handle: &LucivyHandle, config: &QueryConfig, label: &str, with_hig
 #[test]
 fn bench_rag3db_contains() {
     // --- Index ---
-    eprintln!("\n=== Collecting files from {} ===", RAG3DB_CLONE);
-    let files = collect_files(Path::new(RAG3DB_CLONE));
+    // This test runs by default: it takes the clone only when it is already
+    // there, as it took /tmp/rag3db_bench before, and indexes nothing without it.
+    let no_corpus = common::scratch("bench-no-corpus");
+    let rag3db_clone = common::rag3db_clone_if_present().unwrap_or_else(|| no_corpus.path().join("absent"));
+    let scratch = common::scratch("bench-index");
+    let index_dir = scratch.path().to_str().unwrap();
+    let luce_file = common::report_path(LUCE_FILE);
+    eprintln!("\n=== Collecting files from {} ===", rag3db_clone.display());
+    let files = collect_files(&rag3db_clone);
     eprintln!("Found {} text files", files.len());
 
     eprintln!("=== Indexing ===");
     let t0 = Instant::now();
-    let handle = create_index(&files);
+    let handle = create_index(&files, index_dir);
     let ndocs = handle.reader.searcher().num_docs();
     eprintln!("Indexed {} docs in {:.1}s", ndocs, t0.elapsed().as_secs_f64());
 
     // --- Export .luce ---
-    let snap_files = snapshot::read_directory_files(Path::new(INDEX_DIR)).unwrap();
-    let snap = snapshot::SnapshotIndex { path: INDEX_DIR, files: snap_files };
+    let snap_files = snapshot::read_directory_files(Path::new(index_dir)).unwrap();
+    let snap = snapshot::SnapshotIndex { path: index_dir, files: snap_files };
     let blob = snapshot::export_snapshot(&[snap]);
-    std::fs::write(LUCE_FILE, &blob).unwrap();
-    eprintln!("Exported {} ({:.1} MB)\n", LUCE_FILE, blob.len() as f64 / 1024.0 / 1024.0);
+    std::fs::write(&luce_file, &blob).unwrap();
+    eprintln!("Exported {} ({:.1} MB)\n", luce_file.display(), blob.len() as f64 / 1024.0 / 1024.0);
 
     // --- Bench ---
     let queries: Vec<(&str, QueryConfig)> = vec![
@@ -208,7 +216,6 @@ fn bench_rag3db_contains() {
             label, hits, total_no_hl / 3.0, total_hl / 3.0);
     }
 
-    // Cleanup
-    let _ = std::fs::remove_dir_all(INDEX_DIR);
-    eprintln!("\n.luce saved at {} for reuse", LUCE_FILE);
+    // The index directory goes with its guard; the .luce stays for reuse.
+    eprintln!("\n.luce saved at {} for reuse", luce_file.display());
 }

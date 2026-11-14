@@ -3409,11 +3409,13 @@ impl Drop for ShardedHandle {
 mod tests {
     use super::*;
 
-    fn tmp_dir(name: &str) -> String {
-        let p = std::env::temp_dir().join(name);
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
-        p.to_str().unwrap().to_string()
+    /// A fresh directory for one test and its path, removed when the guard
+    /// drops: keep the guard alive as long as the handles opened under it.
+    fn tmp_dir(name: &str) -> (tempfile::TempDir, String) {
+        let label = name.trim_start_matches("lucivy_").replace('_', "-");
+        let scratch = tempfile::Builder::new().prefix(&format!("lucivy-test-{label}-")).tempdir().unwrap();
+        let p = scratch.path().to_str().unwrap().to_string();
+        (scratch, p)
     }
 
     fn make_config(shards: usize) -> SchemaConfig {
@@ -3428,7 +3430,7 @@ mod tests {
 
     #[test]
     fn test_create_and_search_single_shard() {
-        let dir = tmp_dir("lucivy_sharded_single");
+        let (_scratch, dir) = tmp_dir("lucivy_sharded_single");
         let config = make_config(1);
         let handle = ShardedHandle::create(&dir, &config).unwrap();
 
@@ -3464,7 +3466,7 @@ mod tests {
     #[test]
     fn test_commit_under_concurrent_searches_does_not_freeze() {
         use std::sync::atomic::{AtomicBool, Ordering};
-        let dir = tmp_dir("lucivy_commit_under_searches");
+        let (_scratch, dir) = tmp_dir("lucivy_commit_under_searches");
         let handle = Arc::new(ShardedHandle::create(&dir, &make_config(4)).unwrap());
         let body = handle.field("body").unwrap();
         let nid = handle.field(NODE_ID_FIELD).unwrap();
@@ -3525,7 +3527,7 @@ mod tests {
     #[test]
     fn test_updates_during_commits_keep_their_order() {
         use std::sync::atomic::{AtomicBool, Ordering};
-        let dir = tmp_dir("lucivy_updates_during_commits");
+        let (_scratch, dir) = tmp_dir("lucivy_updates_during_commits");
         let handle = Arc::new(ShardedHandle::create(&dir, &make_config(1)).unwrap());
         let body = handle.field("body").unwrap();
         let nid = handle.field(NODE_ID_FIELD).unwrap();
@@ -3643,7 +3645,7 @@ mod tests {
 
     #[test]
     fn a_failed_close_still_stops_its_pools() {
-        let dir = tmp_dir("lucivy_close_folder_gone");
+        let (_scratch, dir) = tmp_dir("lucivy_close_folder_gone");
         let handle = ShardedHandle::create(&dir, &make_config(2)).unwrap();
         let body = handle.field("body").unwrap();
         let nid = handle.field(NODE_ID_FIELD).unwrap();
@@ -3691,7 +3693,7 @@ mod tests {
     /// adding 500 documents right before the drop, on four shards.
     #[test]
     fn test_drop_commits_the_writes_still_queued() {
-        let dir = tmp_dir("lucivy_drop_commits_queued");
+        let (_scratch, dir) = tmp_dir("lucivy_drop_commits_queued");
         for round in 0..20u64 {
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
@@ -3719,7 +3721,7 @@ mod tests {
     /// next commit now reports it, as an error.
     #[test]
     fn test_writes_to_a_shard_without_writer_are_reported_by_commit() {
-        let dir = tmp_dir("lucivy_shard_without_writer");
+        let (_scratch, dir) = tmp_dir("lucivy_shard_without_writer");
         let handle = ShardedHandle::create(&dir, &make_config(1)).unwrap();
         let body = handle.field("body").unwrap();
         let nid = handle.field(NODE_ID_FIELD).unwrap();
@@ -3736,7 +3738,7 @@ mod tests {
 
     #[test]
     fn test_create_and_search_multi_shard() {
-        let dir = tmp_dir("lucivy_sharded_multi");
+        let (_scratch, dir) = tmp_dir("lucivy_sharded_multi");
         let config = make_config(3);
         let handle = ShardedHandle::create(&dir, &config).unwrap();
 
@@ -3782,7 +3784,7 @@ mod tests {
 
     #[test]
     fn test_close_and_reopen() {
-        let dir = tmp_dir("lucivy_sharded_reopen");
+        let (_scratch, dir) = tmp_dir("lucivy_sharded_reopen");
         let config = make_config(2);
 
         // Create and insert
@@ -3817,7 +3819,7 @@ mod tests {
 
     #[test]
     fn test_delete_by_node_id() {
-        let dir = tmp_dir("lucivy_sharded_delete");
+        let (_scratch, dir) = tmp_dir("lucivy_sharded_delete");
         let config = make_config(2);
         let handle = ShardedHandle::create(&dir, &config).unwrap();
 
@@ -3849,8 +3851,8 @@ mod tests {
         use crate::blob_store::MemBlobStore;
 
         let store = std::sync::Arc::new(MemBlobStore::new());
-        let cache = std::env::temp_dir().join("lucivy_blob_shard_test");
-        let _ = std::fs::remove_dir_all(&cache);
+        let _scratch = tempfile::Builder::new().prefix("lucivy-test-blob-shard-test-").tempdir().unwrap();
+        let cache = _scratch.path().to_path_buf();
 
         let config = make_config(2);
         let storage = BlobShardStorage::new(store.clone(), "test_entity", &cache);
@@ -3893,12 +3895,11 @@ mod tests {
         let results2 = handle2.search(&query, 10, None).unwrap();
         assert!(!results2.is_empty());
 
-        let _ = std::fs::remove_dir_all(&cache);
     }
 
     #[test]
     fn test_diag_rr_contains_search() {
-        let dir = tmp_dir("lucivy_diag_rr");
+        let (_scratch, dir) = tmp_dir("lucivy_diag_rr");
         let config: SchemaConfig = serde_json::from_value(serde_json::json!({
             "fields": [
                 {"name": "path", "type": "text", "stored": true},
@@ -3933,7 +3934,7 @@ mod tests {
 
     #[test]
     fn test_search_filtered_prefilter() {
-        let dir = tmp_dir("lucivy_sharded_prefilter");
+        let (_scratch, dir) = tmp_dir("lucivy_sharded_prefilter");
         let config = make_config(2);
         let handle = ShardedHandle::create(&dir, &config).unwrap();
 
@@ -4004,8 +4005,8 @@ mod tests {
 
     #[test]
     fn test_multifield_string_query_bm25() {
-        let dir = std::env::temp_dir().join("lucivy_test_multifield_bm25");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _scratch = tempfile::Builder::new().prefix("lucivy-test-multifield-bm25-").tempdir().unwrap();
+        let dir = _scratch.path().to_path_buf();
         let config: crate::query::SchemaConfig = serde_json::from_value(serde_json::json!({
             "fields": [
                 {"name": "title", "type": "text", "stored": true},
@@ -4057,13 +4058,12 @@ mod tests {
         let results = handle.search(&query, 10, None).unwrap();
         eprintln!("[TEST] results: {}", results.len());
         assert!(!results.is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_fuzzy_contains_small_dataset() {
-        let dir = std::env::temp_dir().join("lucivy_test_fuzzy_small");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _scratch = tempfile::Builder::new().prefix("lucivy-test-fuzzy-small-").tempdir().unwrap();
+        let dir = _scratch.path().to_path_buf();
         let config: crate::query::SchemaConfig = serde_json::from_value(serde_json::json!({
             "fields": [
                 {"name": "body", "type": "text", "stored": true},
@@ -4119,6 +4119,5 @@ mod tests {
         eprintln!("[FUZZY-TEST] fuzzy 'mutx' d=1: {} hits", r3.len());
 
         assert!(r.len() > 0, "fuzzy 'lok' d=1 should find at least 1 doc");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

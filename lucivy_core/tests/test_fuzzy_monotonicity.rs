@@ -575,8 +575,11 @@ fn test_diag_miss_count() {
     // Diagnose which trigrams the fuzzy pipeline misses.
     let content = std::fs::read_to_string(
         std::env::var("DIAG_FILE").unwrap_or_else(|_| {
-            let root = common::rag3db_clone();
-            format!("{}/test/c_api/query_result_test.cpp", root.display())
+            // Runs by default: the clone only if it is already there (no network).
+            match common::rag3db_clone_if_present() {
+                Some(root) => format!("{}/test/c_api/query_result_test.cpp", root.display()),
+                None => String::new(),
+            }
         })
     );
     let content = match content {

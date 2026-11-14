@@ -701,9 +701,8 @@ mod tests {
     /// Integration test: STRING filter field + contains filter via build_query.
     #[test]
     fn test_string_filter_field_eq() {
-        let tmp = std::env::temp_dir().join("lucivy_test_string_filter_eq");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let _scratch = tempfile::Builder::new().prefix("lucivy-test-string-filter-eq-").tempdir().unwrap();
+        let tmp = _scratch.path().to_path_buf();
         let path = tmp.to_str().unwrap();
 
         // Schema: text body + string filter field "tag"
@@ -771,9 +770,8 @@ mod tests {
     fn test_stored_fields_retrieval() {
         use ld_lucivy::schema::Value;
 
-        let tmp = std::env::temp_dir().join("lucivy_test_stored_fields");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let _scratch = tempfile::Builder::new().prefix("lucivy-test-stored-fields-").tempdir().unwrap();
+        let tmp = _scratch.path().to_path_buf();
         let path = tmp.to_str().unwrap();
 
         let config_json = serde_json::json!({
@@ -846,9 +844,8 @@ mod tests {
     /// This is the exact scenario that causes "LockBusy" in the E2E test.
     #[test]
     fn test_handle_close_reopen_lock() {
-        let tmp = std::env::temp_dir().join("lucivy_test_close_reopen_lock");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let _scratch = tempfile::Builder::new().prefix("lucivy-test-close-reopen-lock-").tempdir().unwrap();
+        let tmp = _scratch.path().to_path_buf();
         let path = tmp.to_str().unwrap();
 
         let config_json = serde_json::json!({
@@ -891,9 +888,8 @@ mod tests {
     /// Multiple commits to create many segments → merge activity during drop.
     #[test]
     fn test_handle_close_reopen_with_merges() {
-        let tmp = std::env::temp_dir().join("lucivy_test_close_reopen_merges");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let _scratch = tempfile::Builder::new().prefix("lucivy-test-close-reopen-merges-").tempdir().unwrap();
+        let tmp = _scratch.path().to_path_buf();
         let path = tmp.to_str().unwrap();
 
         let config_json = serde_json::json!({
@@ -938,9 +934,8 @@ mod tests {
     /// Stress: multiple close/reopen cycles on the same directory via LucivyHandle.
     #[test]
     fn test_handle_reopen_cycles() {
-        let tmp = std::env::temp_dir().join("lucivy_test_reopen_cycles");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let _scratch = tempfile::Builder::new().prefix("lucivy-test-reopen-cycles-").tempdir().unwrap();
+        let tmp = _scratch.path().to_path_buf();
         let path = tmp.to_str().unwrap();
 
         let config_json = serde_json::json!({
@@ -996,9 +991,8 @@ mod tests {
     /// Test close(): commit pending writes, release lock, reopen successfully.
     #[test]
     fn test_close_releases_lock() {
-        let tmp = std::env::temp_dir().join("lucivy_test_close_releases_lock");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let _scratch = tempfile::Builder::new().prefix("lucivy-test-close-releases-lock-").tempdir().unwrap();
+        let tmp = _scratch.path().to_path_buf();
         let path = tmp.to_str().unwrap();
 
         let config_json = serde_json::json!({
@@ -1047,9 +1041,8 @@ mod tests {
         use std::sync::Arc;
         use ld_lucivy::query::HighlightSink;
 
-        let tmp = std::env::temp_dir().join("lucivy_test_starts_with_highlights");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let _scratch = tempfile::Builder::new().prefix("lucivy-test-starts-with-highlights-").tempdir().unwrap();
+        let tmp = _scratch.path().to_path_buf();
 
         let config: SchemaConfig = serde_json::from_value(serde_json::json!({
             "fields": [
@@ -1121,9 +1114,8 @@ mod tests {
     /// "rag3db" → query ["rag","3","db"], index ["rag3","db"] → positions [0,0,1].
     #[test]
     fn test_contains_flexible_positions() {
-        let tmp = std::env::temp_dir().join("lucivy_test_flex_pos");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let _scratch = tempfile::Builder::new().prefix("lucivy-test-flex-pos-").tempdir().unwrap();
+        let tmp = _scratch.path().to_path_buf();
 
         let config: SchemaConfig = serde_json::from_value(serde_json::json!({
             "fields": [{"name": "body", "type": "text", "stored": true}]
@@ -1197,15 +1189,13 @@ mod tests {
         assert!(r.contains(&2), "'getElementById function' should find doc 2");
 
         handle.close().unwrap();
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Test regex, term, phrase, fuzzy query types all work with V2 sfxpost.
     #[test]
     fn test_all_query_types_v2() {
-        let tmp = std::env::temp_dir().join("lucivy_test_all_qtypes");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let _scratch = tempfile::Builder::new().prefix("lucivy-test-all-qtypes-").tempdir().unwrap();
+        let tmp = _scratch.path().to_path_buf();
 
         let config: SchemaConfig = serde_json::from_value(serde_json::json!({
             "fields": [{"name": "body", "type": "text", "stored": true}]
@@ -1278,16 +1268,14 @@ mod tests {
         assert!(search("startsWith", "imple", None) > 0);
 
         handle.close().unwrap();
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Comprehensive fuzzy contains diagnostic: index known text, test all variants,
     /// verify highlights match "rag3weaver" exactly.
     #[test]
     fn test_fuzzy_contains() {
-        let tmp = std::env::temp_dir().join("lucivy_test_fuzzy_contains");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let _scratch = tempfile::Builder::new().prefix("lucivy-test-fuzzy-contains-").tempdir().unwrap();
+        let tmp = _scratch.path().to_path_buf();
 
         let config: SchemaConfig = serde_json::from_value(serde_json::json!({
             "fields": [{"name": "body", "type": "text", "stored": true}]
@@ -1401,15 +1389,13 @@ mod tests {
         assert!(all_ok, "some fuzzy queries failed — see [fz_diag] output above");
 
         handle.close().unwrap();
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Reproduce rag3weaver "neural networks" contains failure.
     #[test]
     fn test_contains_neural_networks() {
-        let tmp = std::env::temp_dir().join("lucivy_test_neural_networks");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let _scratch = tempfile::Builder::new().prefix("lucivy-test-neural-networks-").tempdir().unwrap();
+        let tmp = _scratch.path().to_path_buf();
         let path = tmp.to_str().unwrap();
 
         let config_json = serde_json::json!({
@@ -1474,9 +1460,8 @@ mod tests {
         use ld_lucivy::query::HighlightSink;
         use ld_lucivy::schema::Value;
 
-        let tmp = std::env::temp_dir().join("lucivy_test_camel_highlight");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let _scratch = tempfile::Builder::new().prefix("lucivy-test-camel-highlight-").tempdir().unwrap();
+        let tmp = _scratch.path().to_path_buf();
 
         let config: SchemaConfig = serde_json::from_value(serde_json::json!({
             "fields": [{"name": "body", "type": "text", "stored": true}]
@@ -1549,7 +1534,6 @@ mod tests {
         }
 
         handle.close().unwrap();
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -1563,9 +1547,8 @@ mod tests {
         let mut snap = crate::snapshot::import_snapshot(&data).unwrap();
         let imported = snap.indexes.remove(0);
 
-        let tmp = std::env::temp_dir().join("lucivy_diag_luce");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let _scratch = tempfile::Builder::new().prefix("lucivy-test-diag-luce-").tempdir().unwrap();
+        let tmp = _scratch.path().to_path_buf();
         for (name, file_data) in &imported.files {
             let path = tmp.join(name);
             if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).unwrap(); }
@@ -1794,7 +1777,6 @@ mod tests {
         }
 
         handle.close().unwrap();
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Diagnostic: index the real doc 11 and check all highlights for "rag3weaver".
@@ -1809,9 +1791,8 @@ mod tests {
             Err(_) => { eprintln!("[hl_diag] skipping: doc not found"); return; }
         };
 
-        let tmp = std::env::temp_dir().join("lucivy_test_diag_hl");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let _scratch = tempfile::Builder::new().prefix("lucivy-test-diag-hl-").tempdir().unwrap();
+        let tmp = _scratch.path().to_path_buf();
 
         let config: SchemaConfig = serde_json::from_value(serde_json::json!({
             "fields": [{"name": "body", "type": "text", "stored": true}]
@@ -1878,6 +1859,5 @@ mod tests {
         assert!(all_ok, "some highlights were incorrect");
 
         handle.close().unwrap();
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

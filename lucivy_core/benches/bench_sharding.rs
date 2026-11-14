@@ -7,6 +7,9 @@
 //!   cargo test -p lucivy-core --test bench_sharding -- --nocapture
 //!   MAX_DOCS=500 cargo test -p lucivy-core --test bench_sharding -- --nocapture
 
+#[path = "../tests/common/mod.rs"]
+mod common;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -15,13 +18,14 @@ use lucivy_core::handle::{LucivyHandle, NODE_ID_FIELD};
 use lucivy_core::query::{self, QueryConfig};
 use lucivy_core::sharded_handle::ShardedHandle;
 
-const RAG3DB_CLONE: &str = "/tmp/rag3db_bench";
 // Under `$LUCIVY_BENCH_DIR`, else `$HOME/lucivy_bench`: these were hard-coded
 // to one machine's home and failed with "Permission denied" everywhere else.
+// Without either, next to the reports (`common::report_path`): t01 leaves the
+// index on purpose for the tests that read it after.
 fn bench_root() -> String {
     std::env::var("LUCIVY_BENCH_DIR")
         .or_else(|_| std::env::var("HOME").map(|h| format!("{h}/lucivy_bench")))
-        .unwrap_or_else(|_| "/tmp/lucivy_bench".to_string())
+        .unwrap_or_else(|_| common::report_path("lucivy_bench").display().to_string())
 }
 fn bench_base() -> String { format!("{}/lucivy_bench_sharding", bench_root()) }
 const MAX_FILE_SIZE: u64 = 100_000;
@@ -223,9 +227,8 @@ fn time_sharded_query_traced(handle: &ShardedHandle, config: &QueryConfig, label
 
 #[test]
 fn t00_repro_starts_with_prefix() {
-    let dir = "/tmp/lucivy_test_sw_repro";
-    let _ = std::fs::remove_dir_all(dir);
-    std::fs::create_dir_all(dir).unwrap();
+    let scratch = common::scratch("lucivy_test_sw_repro");
+    let dir = scratch.path().to_str().unwrap();
 
     let config: query::SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [{"name": "content", "type": "text", "stored": true}]
@@ -299,8 +302,6 @@ fn t00_repro_starts_with_prefix() {
     }
 
     assert_eq!(results, 6, "startsWith 'lock' should find exactly 6 docs");
-
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 // ─── Diagnostic: startsWith missing docs ───────────────────────────────────
@@ -450,12 +451,13 @@ fn t01_bench_sharding_comparison() {
 
     // Auto-clone if BENCH_DATASET is a git URL
     let dataset = if dataset_raw.starts_with("http://") || dataset_raw.starts_with("https://") || dataset_raw.starts_with("git@") {
-        let clone_dir = format!("/tmp/lucivy_bench_clone_{:x}", {
+        // A clone cached between runs on purpose, next to the reports (not in /tmp).
+        let clone_dir = common::report_path(&format!("lucivy_bench_clone_{:x}", {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             dataset_raw.hash(&mut h);
             h.finish()
-        });
+        })).display().to_string();
         if !Path::new(&clone_dir).join(".git").exists() {
             eprintln!("\n=== Cloning {} → {} ===", dataset_raw, clone_dir);
             let status = std::process::Command::new("git")

@@ -255,9 +255,8 @@ mod tests {
 
     #[test]
     fn test_aggregated_stats_single_shard() {
-        let tmp = std::env::temp_dir().join("lucivy_bm25_global_single");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let _scratch = tempfile::Builder::new().prefix("lucivy-test-bm25-global-single-").tempdir().unwrap();
+        let tmp = _scratch.path().to_path_buf();
 
         let config: SchemaConfig = serde_json::from_value(serde_json::json!({
             "fields": [{"name": "body", "type": "text", "stored": true}]
@@ -298,10 +297,9 @@ mod tests {
 
     #[test]
     fn test_aggregated_stats_two_shards() {
-        let tmp1 = std::env::temp_dir().join("lucivy_bm25_global_s1");
-        let tmp2 = std::env::temp_dir().join("lucivy_bm25_global_s2");
-        let _ = std::fs::remove_dir_all(&tmp1);
-        let _ = std::fs::remove_dir_all(&tmp2);
+        let _scratch = tempfile::Builder::new().prefix("lucivy-test-bm25-global-s-").tempdir().unwrap();
+        let tmp1 = _scratch.path().join("lucivy_bm25_global_s1");
+        let tmp2 = _scratch.path().join("lucivy_bm25_global_s2");
         std::fs::create_dir_all(&tmp1).unwrap();
         std::fs::create_dir_all(&tmp2).unwrap();
 
