@@ -482,3 +482,42 @@ fn diag_ids_sans_texte_tous_champs() {
     eprintln!("BILAN {} : ids {grand_ids}, inconnus du dictionnaire {grand_missing}, segments en attente {pending_total}",
         root.display());
 }
+
+/// Sonde de cohérence (14 novembre 2026, session hotfixs de rag3db, pour le ticket lucivy
+/// 2026-11-13-le-plein-texte-du-depot-pese-cent-fois-ses-sources) : DIAG_TABLE=<copie d'un .fts>/Lucivy_<T>
+/// écrit dans DIAG_SORTIE un `_node_id` par document VIVANT (un par ligne : shard, segment, numéro, _node_id),
+/// et sur stderr, par shard, max_doc, num_docs et le nombre de `_node_id` lus. Ouvre chaque shard avec un
+/// writer : à jouer sur une copie neuve.
+#[test]
+#[ignore]
+fn diag_node_ids_vivants() {
+    use std::io::Write;
+    let table = std::path::PathBuf::from(std::env::var("DIAG_TABLE").expect("DIAG_TABLE"));
+    let mut sortie = std::io::BufWriter::new(std::fs::File::create(std::env::var("DIAG_SORTIE").expect("DIAG_SORTIE")).unwrap());
+    let mut shards: Vec<_> = std::fs::read_dir(&table).unwrap().filter_map(|e| e.ok()).map(|e| e.path())
+        .filter(|p| p.is_dir() && p.file_name().unwrap().to_string_lossy().starts_with("shard_")).collect();
+    shards.sort();
+    let (mut total_max, mut total_vivants, mut total_ids) = (0u64, 0u64, 0u64);
+    for shard in shards {
+        let handle = LucivyHandle::open(StdFsDirectory::open(&shard).unwrap()).unwrap();
+        let searcher = handle.reader.searcher();
+        let nom = shard.file_name().unwrap().to_string_lossy().to_string();
+        let (mut max, mut vivants, mut ids) = (0u64, 0u64, 0u64);
+        for reader in searcher.segment_readers() {
+            let colonne = reader.fast_fields().u64(lucivy_core::handle::NODE_ID_FIELD).expect("colonne _node_id");
+            let seg = reader.segment_id().uuid_string();
+            max += reader.max_doc() as u64;
+            vivants += reader.num_docs() as u64;
+            for doc in 0..reader.max_doc() {
+                if reader.alive_bitset().is_some_and(|b| !b.is_alive(doc)) { continue; }
+                if let Some(id) = colonne.first(doc) {
+                    ids += 1;
+                    writeln!(sortie, "{nom} {seg} {doc} {id}").unwrap();
+                }
+            }
+        }
+        eprintln!("SHARD {nom} : max_doc {max}, vivants {vivants}, _node_id lus {ids}");
+        total_max += max; total_vivants += vivants; total_ids += ids;
+    }
+    eprintln!("BILAN {} : max_doc {total_max}, vivants {total_vivants}, _node_id lus {total_ids}", table.display());
+}
