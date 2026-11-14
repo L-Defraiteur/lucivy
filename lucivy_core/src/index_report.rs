@@ -96,23 +96,32 @@ impl IndexReport {
 
     /// The report in a few lines, for a person.
     pub fn summary(&self) -> String {
-        let mb = |b: u64| b as f64 / 1e6;
+        let mb = |b: u64| human(b);
         let pct = |a: u64, b: u64| 100.0 * a as f64 / b.max(1) as f64;
         let (written, deleted) = self.documents();
         let mut out = format!(
-            "{:.1} MB on disk for {:.1} MB of stored text (×{:.1}); {} segments, {} documents written, {} deleted ({:.1} %).\n",
+            "{} on disk for {} of stored text (×{:.1}); {} segments, {} documents written, {} deleted ({:.1} %).\n",
             mb(self.index_bytes), mb(self.stored_text_bytes), self.ratio(), self.segments.len(),
             written, deleted, pct(deleted, written));
         for (kind, bytes) in &self.bytes_by_kind {
-            out += &format!("  {kind}: {:.1} MB ({:.1} %)\n", mb(*bytes), pct(*bytes, self.index_bytes));
+            out += &format!("  {kind}: {} ({:.1} %)\n", mb(*bytes), pct(*bytes, self.index_bytes));
         }
         for f in &self.fields {
             out += &format!(
-                "  field {}: {} documents, {:.1} MB; sizes p50 {} B, p90 {} B, p99 {} B, max {} B; {} exact duplicates ({:.1} MB)\n",
+                "  field {}: {} documents, {}; sizes p50 {} B, p90 {} B, p99 {} B, max {} B; {} exact duplicates ({})\n",
                 f.field, f.docs, mb(f.bytes), f.p50, f.p90, f.p99, f.max, f.duplicate_docs, mb(f.duplicate_bytes));
         }
         out
     }
+}
+
+/// Bytes in the unit that reads best (B, KB, MB, GB; powers of 1000).
+fn human(bytes: u64) -> String {
+    let b = bytes as f64;
+    if b < 1e3 { format!("{bytes} B") }
+    else if b < 1e6 { format!("{:.1} KB", b / 1e3) }
+    else if b < 1e9 { format!("{:.1} MB", b / 1e6) }
+    else { format!("{:.2} GB", b / 1e9) }
 }
 
 /// The family of an index file, by its name.
@@ -191,7 +200,7 @@ impl LucivyHandle {
     pub(crate) fn gather_report(&self, shard: usize, out: &mut Gathered) -> Result<(), String> {
         let directory = self.index.directory();
         let size_of = |path: &std::path::Path| directory.open_read(path).map(|f| ld_lucivy::HasLen::len(&f) as u64).unwrap_or(0);
-        let mut add = |path: &std::path::Path, out: &mut Gathered| -> u64 {
+        let add = |path: &std::path::Path, out: &mut Gathered| -> u64 {
             let bytes = size_of(path);
             let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             *out.bytes_by_kind.entry(kind_of(&name).to_string()).or_default() += bytes;
