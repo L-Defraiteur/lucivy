@@ -93,10 +93,7 @@ pub fn rag3db_clone() -> std::path::PathBuf {
     if let Ok(root) = std::env::var("RAG3DB_ROOT") {
         return root.into();
     }
-    let base = std::env::var_os("XDG_CACHE_HOME").map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))
-        .unwrap_or_else(std::env::temp_dir);
-    let path = base.join("lucivy-tests").join("rag3db-clone");
+    let path = rag3db_clone_path();
     if !path.exists() {
         let parent = path.parent().unwrap();
         std::fs::create_dir_all(parent).expect("create the clone's parent");
@@ -118,4 +115,23 @@ pub fn rag3db_clone() -> std::path::PathBuf {
         }
     }
     path
+}
+
+/// Where `rag3db_clone()` keeps its clone, without `RAG3DB_ROOT`.
+fn rag3db_clone_path() -> std::path::PathBuf {
+    let base = std::env::var_os("XDG_CACHE_HOME").map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("lucivy-tests").join("rag3db-clone")
+}
+
+/// The rag3db clone if it is already there (`RAG3DB_ROOT`, or the cache of
+/// `rag3db_clone()`), without cloning: for a test that runs by default and
+/// must not reach the network.
+pub fn rag3db_clone_if_present() -> Option<std::path::PathBuf> {
+    if let Ok(root) = std::env::var("RAG3DB_ROOT") {
+        return Some(root.into());
+    }
+    let path = rag3db_clone_path();
+    path.exists().then_some(path)
 }

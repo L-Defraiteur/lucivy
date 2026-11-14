@@ -457,8 +457,10 @@ mod tests {
     use crate::handle::LucivyHandle;
     use crate::query::SchemaConfig;
 
-    fn cache_base() -> PathBuf {
-        std::env::temp_dir().join("lucivy_test_cache")
+    /// A cache root for one test, removed when the guard drops: keep it
+    /// alive as long as the directories opened under it.
+    fn cache_base() -> tempfile::TempDir {
+        tempfile::Builder::new().prefix("lucivy-test-cache-").tempdir().unwrap()
     }
 
     fn test_config() -> SchemaConfig {
@@ -509,12 +511,13 @@ mod tests {
     /// regular file whose save failed must not read as existing either.
     #[test]
     fn store_outage_leaves_no_lock_file_and_no_half_written_file() {
+        let _scratch = cache_base();
         use ld_lucivy::directory::{Directory, META_LOCK, TerminatingWrite};
         let store = Arc::new(FlakyStore {
             inner: MemBlobStore::new(),
             fail: std::sync::atomic::AtomicBool::new(true),
         });
-        let dir = BlobDirectory::new(store.clone(), "outage_idx", &cache_base()).unwrap();
+        let dir = BlobDirectory::new(store.clone(), "outage_idx", _scratch.path()).unwrap();
 
         // The lock is taken and released normally with the store down.
         let guard = dir.acquire_lock(&META_LOCK).expect("a lock never goes to the store");
@@ -541,8 +544,9 @@ mod tests {
 
     #[test]
     fn test_blob_directory_create_and_search() {
+        let _scratch = cache_base();
         let store = Arc::new(MemBlobStore::new());
-        let dir = BlobDirectory::new(store.clone(), "test_idx", &cache_base()).unwrap();
+        let dir = BlobDirectory::new(store.clone(), "test_idx", _scratch.path()).unwrap();
         let config = test_config();
 
         let handle = LucivyHandle::create(dir, &config).unwrap();
@@ -562,12 +566,13 @@ mod tests {
 
     #[test]
     fn test_blob_directory_create_close_reopen() {
+        let _scratch = cache_base();
         let store = Arc::new(MemBlobStore::new());
         let config = test_config();
 
         // Phase 1: create + insert + close
         {
-            let dir = BlobDirectory::new(store.clone(), "reopen_idx", &cache_base()).unwrap();
+            let dir = BlobDirectory::new(store.clone(), "reopen_idx", _scratch.path()).unwrap();
             let handle = LucivyHandle::create(dir, &config).unwrap();
             insert_docs(&handle, 10);
             handle.close().unwrap();
@@ -575,7 +580,7 @@ mod tests {
         }
 
         // Phase 2: reopen from store — blobs re-materialized to fresh cache_dir
-        let dir = BlobDirectory::new(store.clone(), "reopen_idx", &cache_base()).unwrap();
+        let dir = BlobDirectory::new(store.clone(), "reopen_idx", _scratch.path()).unwrap();
         let handle = LucivyHandle::open(dir).unwrap();
         handle.reader.reload().unwrap();
         assert_eq!(
@@ -587,8 +592,9 @@ mod tests {
 
     #[test]
     fn test_blob_directory_worm_semantics() {
+        let _scratch = cache_base();
         let store = Arc::new(MemBlobStore::new());
-        let dir = BlobDirectory::new(store, "worm_idx", &cache_base()).unwrap();
+        let dir = BlobDirectory::new(store, "worm_idx", _scratch.path()).unwrap();
 
         // Write a file
         let path = Path::new("test.bin");
@@ -612,12 +618,13 @@ mod tests {
 
     #[test]
     fn test_blob_directory_search_after_reopen() {
+        let _scratch = cache_base();
         let store = Arc::new(MemBlobStore::new());
         let config = test_config();
 
         // Create and populate
         {
-            let dir = BlobDirectory::new(store.clone(), "search_idx", &cache_base()).unwrap();
+            let dir = BlobDirectory::new(store.clone(), "search_idx", _scratch.path()).unwrap();
             let handle = LucivyHandle::create(dir, &config).unwrap();
             let body = handle.field("body").unwrap();
             let nid = handle.field("_node_id").unwrap();
@@ -641,7 +648,7 @@ mod tests {
         }
 
         // Reopen and search
-        let dir = BlobDirectory::new(store, "search_idx", &cache_base()).unwrap();
+        let dir = BlobDirectory::new(store, "search_idx", _scratch.path()).unwrap();
         let handle = LucivyHandle::open(dir).unwrap();
         handle.reader.reload().unwrap();
 
@@ -663,11 +670,12 @@ mod tests {
 
     #[test]
     fn test_blob_directory_multiple_indexes_isolated() {
+        let _scratch = cache_base();
         let store = Arc::new(MemBlobStore::new());
         let config = test_config();
 
-        let dir1 = BlobDirectory::new(store.clone(), "idx_a", &cache_base()).unwrap();
-        let dir2 = BlobDirectory::new(store.clone(), "idx_b", &cache_base()).unwrap();
+        let dir1 = BlobDirectory::new(store.clone(), "idx_a", _scratch.path()).unwrap();
+        let dir2 = BlobDirectory::new(store.clone(), "idx_b", _scratch.path()).unwrap();
 
         let h1 = LucivyHandle::create(dir1, &config).unwrap();
         let h2 = LucivyHandle::create(dir2, &config).unwrap();
@@ -684,13 +692,14 @@ mod tests {
 
     #[test]
     fn test_blob_directory_survives_cache_cleanup() {
+        let _scratch = cache_base();
         // Verify that data persists in the BlobStore even after cache_dir is deleted
         let store = Arc::new(MemBlobStore::new());
         let config = test_config();
 
         // Create, insert, close (cache_dir cleaned on drop)
         {
-            let dir = BlobDirectory::new(store.clone(), "survive_idx", &cache_base()).unwrap();
+            let dir = BlobDirectory::new(store.clone(), "survive_idx", _scratch.path()).unwrap();
             let handle = LucivyHandle::create(dir, &config).unwrap();
             insert_docs(&handle, 20);
             handle.close().unwrap();
@@ -702,7 +711,7 @@ mod tests {
         assert!(store.exists("Lucivy_survive_idx", "meta.json").unwrap());
 
         // Reopen — materializes from store to fresh cache
-        let dir = BlobDirectory::new(store, "survive_idx", &cache_base()).unwrap();
+        let dir = BlobDirectory::new(store, "survive_idx", _scratch.path()).unwrap();
         let handle = LucivyHandle::open(dir).unwrap();
         handle.reader.reload().unwrap();
         assert_eq!(handle.reader.searcher().num_docs(), 20);
@@ -710,10 +719,11 @@ mod tests {
 
     #[test]
     fn test_blob_directory_multiple_commits() {
+        let _scratch = cache_base();
         let store = Arc::new(MemBlobStore::new());
         let config = test_config();
 
-        let dir = BlobDirectory::new(store.clone(), "multi_commit", &cache_base()).unwrap();
+        let dir = BlobDirectory::new(store.clone(), "multi_commit", _scratch.path()).unwrap();
         let handle = LucivyHandle::create(dir, &config).unwrap();
         let body = handle.field("body").unwrap();
         let nid = handle.field("_node_id").unwrap();
@@ -738,7 +748,7 @@ mod tests {
         handle.close().unwrap();
         drop(handle);
 
-        let dir = BlobDirectory::new(store, "multi_commit", &cache_base()).unwrap();
+        let dir = BlobDirectory::new(store, "multi_commit", _scratch.path()).unwrap();
         let handle = LucivyHandle::open(dir).unwrap();
         handle.reader.reload().unwrap();
         assert_eq!(handle.reader.searcher().num_docs(), 50);

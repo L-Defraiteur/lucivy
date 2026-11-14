@@ -21,6 +21,9 @@
 //!     --test compare_tantivy -- --ignored --nocapture
 //! ```
 
+#[path = "../tests/common/mod.rs"]
+mod common;
+
 use std::path::Path;
 use std::time::Instant;
 
@@ -254,12 +257,18 @@ fn compare_tantivy() {
     eprintln!("{} files, {:.0} MB of text\n", files.len(), bytes as f64 / 1_048_576.0);
     assert!(!files.is_empty(), "empty corpus — set CMP_CORPUS");
 
+    // Both indexes in a scratch directory, removed when the guard drops
+    // (declared before the indexes, so it outlives them).
+    let scratch = common::scratch("compare-tantivy");
+    let tv_default = scratch.path().join("tv_default").display().to_string();
+    let tv_ngram = scratch.path().join("tv_ngram").display().to_string();
+
     eprintln!("=== indexing: tantivy, default tokenizer ===");
-    let plain = build(&files, "/tmp/tv_default", false);
+    let plain = build(&files, &tv_default, false);
     eprintln!("  {:.1}s, {:.0} MB\n", plain.seconds, plain.bytes as f64 / 1_048_576.0);
 
     eprintln!("=== indexing: tantivy, trigram tokenizer ===");
-    let tri = build(&files, "/tmp/tv_ngram", true);
+    let tri = build(&files, &tv_ngram, true);
     eprintln!("  {:.1}s, {:.0} MB ({:.1}x the default index)\n",
               tri.seconds, tri.bytes as f64 / 1_048_576.0,
               tri.bytes as f64 / plain.bytes.max(1) as f64);
@@ -431,7 +440,15 @@ fn probe_substrings() {
     let files = collect(Path::new(&root));
     assert!(!files.is_empty(), "empty corpus — set CMP_CORPUS");
     let probes = std::env::var("CMP_PROBE").unwrap_or_else(|_| "de|©|→|Müller|naïve|pin_loc|utex_loc|int i|return -ENOMEM;|spin_lock(&|->next|#include <linux/".into());
-    let dir = "/tmp/tv_ngram";
+    // CMP_REUSE: the trigram index is kept between runs next to the reports
+    // (built there the first time); otherwise a scratch directory.
+    let scratch = common::scratch("tv-ngram");
+    let dir_buf = if std::env::var("CMP_REUSE").is_ok() {
+        common::report_path("tv_ngram").display().to_string()
+    } else {
+        scratch.path().join("tv_ngram").display().to_string()
+    };
+    let dir = dir_buf.as_str();
     let tri = if std::env::var("CMP_REUSE").is_ok() && Path::new(dir).join("meta.json").exists() {
         let index = TvIndex::open_in_dir(dir).unwrap();
         let analyzer = TextAnalyzer::builder(NgramTokenizer::new(3, 3, false).unwrap()).filter(LowerCaser).build();

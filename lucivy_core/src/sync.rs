@@ -271,10 +271,9 @@ mod tests {
 
     #[test]
     fn test_export_apply_delta_e2e() {
-        let tmp_src = std::env::temp_dir().join("lucivy_sync2_src");
-        let tmp_dst = std::env::temp_dir().join("lucivy_sync2_dst");
-        let _ = std::fs::remove_dir_all(&tmp_src);
-        let _ = std::fs::remove_dir_all(&tmp_dst);
+        let _scratch = tempfile::Builder::new().prefix("lucivy-test-sync2-").tempdir().unwrap();
+        let tmp_src = _scratch.path().join("lucivy_sync2_src");
+        let tmp_dst = _scratch.path().join("lucivy_sync2_dst");
         std::fs::create_dir_all(&tmp_src).unwrap();
         std::fs::create_dir_all(&tmp_dst).unwrap();
 
@@ -321,18 +320,15 @@ mod tests {
 
         handle.close().unwrap();
         handle_dst.close().unwrap();
-        let _ = std::fs::remove_dir_all(&tmp_src);
-        let _ = std::fs::remove_dir_all(&tmp_dst);
     }
 
     // ── Sharded delta E2E ────────────────────────────────────────────────
 
     #[test]
     fn test_sharded_delta_e2e() {
-        let tmp_src = std::env::temp_dir().join("lucivy_sharded_sync2_src");
-        let tmp_dst = std::env::temp_dir().join("lucivy_sharded_sync2_dst");
-        let _ = std::fs::remove_dir_all(&tmp_src);
-        let _ = std::fs::remove_dir_all(&tmp_dst);
+        let _scratch = tempfile::Builder::new().prefix("lucivy-test-sharded-sync2-").tempdir().unwrap();
+        let tmp_src = _scratch.path().join("lucivy_sharded_sync2_src");
+        let tmp_dst = _scratch.path().join("lucivy_sharded_sync2_dst");
 
         let num_shards = 2;
         let config = test_config();
@@ -426,17 +422,14 @@ mod tests {
         assert_eq!(total, 30);
 
         for h in &handles { h.close().unwrap(); }
-        let _ = std::fs::remove_dir_all(&tmp_src);
-        let _ = std::fs::remove_dir_all(&tmp_dst);
     }
 
     // ── SyncServer with LucivyHandle ─────────────────────────────────────
 
     #[test]
     fn test_sync_server_with_handle() {
-        let tmp = std::env::temp_dir().join("lucivy_sync_server2");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let _scratch = tempfile::Builder::new().prefix("lucivy-test-sync-server2-").tempdir().unwrap();
+        let tmp = _scratch.path().to_path_buf();
 
         let config = test_config();
         let dir = StdFsDirectory::open(tmp.to_str().unwrap()).unwrap();
@@ -465,6 +458,5 @@ mod tests {
         assert!(matches!(server.lookup_single("unknown").unwrap(), SyncResponse::FullSnapshot));
 
         handle.close().unwrap();
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
