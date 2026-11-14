@@ -1,8 +1,14 @@
-# lucivy 4.3.6
+# lucivy 4.3.7
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. From Node.js. Runs in your process, in your transaction (bring your own storage), and the same engine runs in the browser. Powered by Rust via napi-rs, MIT.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
+
+### What's new in 4.3.7
+
+A patch release with one fix. The index format is unchanged.
+
+- **Filtered searches rank like their subset.** A search restricted to a set of document ids (`allowedIds`) scored with the document count of the whole index but the word frequencies of the subset, which pushed its scores far off (2.26 instead of 0.05 in the test). It now scores as if the index held only the allowed documents.
 
 ### What's new in 4.3.6
 
@@ -133,7 +139,7 @@ Still there from 2.x: SFX-only engine, distributed search (`exportStats` / `merg
 ## Install
 
 ```bash
-npm install lucivy   # 4.3.6
+npm install lucivy   # 4.3.7
 ```
 
 ## Quick start
