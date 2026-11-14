@@ -2971,8 +2971,12 @@ impl ShardedHandle {
             // Rounds until the segment count stops falling: a round only
             // merges the segments free at planning time, and a policy
             // cascade may still be releasing some.
-            let segments = |shard: &Arc<LucivyHandle>| -> usize {
-                shard.index.searchable_segment_metas().map(|m| m.len()).unwrap_or(0)
+            // A round counts when it lowers the segment count or the deleted
+            // documents (a lone segment rewritten to purge its deletions).
+            let segments = |shard: &Arc<LucivyHandle>| -> (usize, u64) {
+                shard.index.searchable_segment_metas()
+                    .map(|m| (m.len(), m.iter().map(|s| s.num_deleted_docs() as u64).sum()))
+                    .unwrap_or((0, 0))
             };
             let mut before = segments(shard);
             let mut stalls = 0;
@@ -2988,7 +2992,7 @@ impl ShardedHandle {
                 if after < before { merges += 1; stalls = 0; } else { stalls += 1; }
                 // A round can find nothing while a policy cascade still holds
                 // segments; give it a moment and look again before giving up.
-                if after <= 1 || stalls >= 2 { break; }
+                if (after.0 <= 1 && after.1 == 0) || stalls >= 2 { break; }
                 if after >= before { std::thread::sleep(std::time::Duration::from_millis(200)); }
                 before = after;
             }

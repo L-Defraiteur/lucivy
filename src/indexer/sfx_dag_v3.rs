@@ -1050,6 +1050,45 @@ pub struct SegmentSfxDict<'a> {
     pub doc_remap: &'a std::collections::HashMap<u32, u32>,
 }
 
+/// The ids of `union` (sorted) that still have a document in the merged
+/// segment: a local ordinal of some input whose chunk or word postings name
+/// a document that `doc_remap` keeps. A segment's ids are not all alive even
+/// without a deletion now: a segment merged before 14 November 2026 kept the
+/// ids of its deleted documents, with empty postings.
+fn live_ids_of(
+    segments: &[SegmentSfxDict<'_>],
+    gmaps: &[crate::suffix_fst::gmap::GmapReader<'_>],
+    union: Vec<u32>,
+) -> Vec<u32> {
+    use crate::suffix_fst::word_sfxpost::WordSfxPostReader;
+    let mut alive = vec![false; union.len()];
+    for (seg, gmap) in segments.iter().zip(gmaps) {
+        let slots: Vec<usize> = gmap.iter().map(|g| union.binary_search(&g).unwrap()).collect();
+        let sfxpost = seg.sfxpost.and_then(SfxPostReaderV2::open_slice);
+        let words = seg.word_sfxpost.and_then(WordSfxPostReader::open);
+        for (old, &slot) in slots.iter().enumerate() {
+            if alive[slot] { continue }
+            let old = old as u32;
+            let mut live = false;
+            if let Some(r) = sfxpost.as_ref().filter(|r| old < r.num_terms()) {
+                r.for_each_doc(old, |doc, _| live |= seg.doc_remap.contains_key(&doc));
+            }
+            if !live {
+                if let Some(r) = words.as_ref().filter(|r| old < r.num_ordinals()) {
+                    r.for_each_doc(old, |doc, _| live |= seg.doc_remap.contains_key(&doc));
+                }
+            }
+            alive[slot] = live;
+        }
+    }
+    if std::env::var("LUCIVY_TRACE_LIVE_IDS").is_ok() {
+        let kept = alive.iter().filter(|a| **a).count();
+        let removed: usize = segments.iter().map(|s| s.doc_remap.len()).sum();
+        eprintln!("[live_ids_of] {} segments, {} ids, {kept} alive, {removed} documents kept", segments.len(), union.len());
+    }
+    union.into_iter().zip(alive).filter_map(|(g, a)| a.then_some(g)).collect()
+}
+
 /// Merge dictionary segments: the union of their global ids becomes the new
 /// segment's sorted `.gmap`, every local ordinal is remapped through it, and
 /// the postings, word postings and sibling links are concatenated. No text
@@ -1073,13 +1112,22 @@ pub fn merge_segments_dict(
     let mut union: Vec<u32> = gmaps.iter().flat_map(|g| g.iter()).collect();
     union.sort_unstable();
     union.dedup();
+    // Only the ids that still have a live document survive. Until 14
+    // November 2026 the merged `.gmap` was the plain union: the id of a term
+    // whose every document was deleted stayed, with empty postings, and the
+    // shard dictionary could never learn that it was dead (513.8 MB of
+    // dictionary kept after purging 8 809 documents of Lucivy_Scope and
+    // compacting, against 420.1 MB for a fresh index of the survivors). The
+    // pass reads the documents of the postings, not their positions.
+    let union = live_ids_of(segments, &gmaps, union);
     // The merged segment's longest word: the max of the inputs', unknown
     // as soon as one input does not say.
     let max_word_content_len: Option<u16> = gmaps.iter()
         .map(|g| g.max_word_content_len())
         .try_fold(0u16, |acc, m| m.map(|m| acc.max(m)));
     let num = union.len();
-    let new_local = |global: u32| -> u32 { union.binary_search(&global).unwrap() as u32 };
+    // `None`: an id with no live document, left out of the merged segment.
+    let new_local = |global: u32| -> Option<u32> { union.binary_search(&global).ok().map(|i| i as u32) };
 
     let mut content_postings: Vec<Vec<(u32, u32)>> = vec![Vec::new(); num];
     // The sources' layout, as in `merge_segments_v3`; without positions,
@@ -1091,12 +1139,12 @@ pub fn merge_segments_dict(
     let mut num_docs = 0u32;
 
     for (seg, gmap) in segments.iter().zip(&gmaps) {
-        let remap: Vec<u32> = gmap.iter().map(new_local).collect();
+        let remap: Vec<Option<u32>> = gmap.iter().map(new_local).collect();
         let remap_doc = |d: u32| seg.doc_remap.get(&d).copied();
         let sfxpost = seg.sfxpost.and_then(SfxPostReaderV2::open_slice);
         if let Some(r) = &sfxpost {
             for old in 0..r.num_terms().min(remap.len() as u32) {
-                let new = remap[old as usize];
+                let Some(new) = remap[old as usize] else { continue };
                 if r.has_positions() {
                     r.for_each_position(old, |doc, ti| {
                         if let Some(d) = remap_doc(doc) {
@@ -1117,7 +1165,7 @@ pub fn merge_segments_dict(
         }
         if let Some(r) = seg.word_sfxpost.and_then(WordSfxPostReader::open).filter(|r| !r.has_positions()) {
             for old in 0..r.num_ordinals().min(remap.len() as u32) {
-                let new = remap[old as usize];
+                let Some(new) = remap[old as usize] else { continue };
                 r.for_each_doc(old, |doc, tf| {
                     if let Some(d) = remap_doc(doc) {
                         for k in 0..tf {
@@ -1135,7 +1183,7 @@ pub fn merge_segments_dict(
                 seg.posmap.and_then(crate::suffix_fst::posmap::PosMapReader::open)
             } else { None };
             for old in 0..r.num_ordinals().min(remap.len() as u32) {
-                let new = remap[old as usize];
+                let Some(new) = remap[old as usize] else { continue };
                 r.for_each_entry(old, |e| {
                     if let Some(d) = remap_doc(e.doc_id) {
                         let tail_off = if spanned_posmap.is_some() {
@@ -1152,10 +1200,10 @@ pub fn merge_segments_dict(
         }
         if let Some(sib) = seg.sibling_v3.and_then(crate::suffix_fst::sibling_table::SiblingTableReader::open).filter(|_| positions) {
             for old in 0..sib.num_ordinals().min(remap.len() as u32) {
-                let from = remap[old as usize];
+                let Some(from) = remap[old as usize] else { continue };
                 for e in sib.siblings(old) {
-                    if (e.next_ordinal as usize) < remap.len() {
-                        sibling_writer.add(from, remap[e.next_ordinal as usize], 0);
+                    if let Some(Some(next)) = remap.get(e.next_ordinal as usize) {
+                        sibling_writer.add(from, *next, 0);
                     }
                 }
             }
