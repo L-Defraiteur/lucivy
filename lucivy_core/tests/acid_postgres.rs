@@ -12,6 +12,8 @@
 //! 3. Cleanup:
 //!    docker compose -f docker-compose.test.yml down -v
 
+mod common;
+
 use std::io;
 use std::sync::Mutex;
 
@@ -148,8 +150,8 @@ fn test_acid_sharded_postgres_create_reopen_search() {
     store.clear_index("acid_test_1");
 
     let config = make_config(2);
-    let cache = std::env::temp_dir().join("lucivy_acid_test_1");
-    let _ = std::fs::remove_dir_all(&cache);
+    let scratch = common::scratch("acid-postgres");
+    let cache = scratch.path().join("lucivy_acid_test_1");
 
     // Create sharded index backed by Postgres
     let storage = lucivy_core::sharded_handle::BlobShardStorage::new(
@@ -242,8 +244,8 @@ fn test_acid_blobs_in_postgres() {
     store.clear_index("acid_test_2");
 
     let config = make_config(1);
-    let cache = std::env::temp_dir().join("lucivy_acid_test_2");
-    let _ = std::fs::remove_dir_all(&cache);
+    let scratch = common::scratch("acid-postgres");
+    let cache = scratch.path().join("lucivy_acid_test_2");
 
     let storage = lucivy_core::sharded_handle::BlobShardStorage::new(
         store.clone(), "acid_test_2", &cache,
@@ -286,8 +288,8 @@ fn test_acid_crash_recovery() {
     store.clear_index("acid_test_3");
 
     let config = make_config(2);
-    let cache = std::env::temp_dir().join("lucivy_acid_test_3");
-    let _ = std::fs::remove_dir_all(&cache);
+    let scratch = common::scratch("acid-postgres");
+    let cache = scratch.path().join("lucivy_acid_test_3");
 
     let storage = lucivy_core::sharded_handle::BlobShardStorage::new(
         store.clone(), "acid_test_3", &cache,
@@ -343,10 +345,9 @@ fn test_distributed_search_two_nodes_postgres() {
     store.clear_index("dist_node_b");
 
     let config = make_config(2);
-    let cache_a = std::env::temp_dir().join("lucivy_dist_a");
-    let cache_b = std::env::temp_dir().join("lucivy_dist_b");
-    let _ = std::fs::remove_dir_all(&cache_a);
-    let _ = std::fs::remove_dir_all(&cache_b);
+    let scratch = common::scratch("acid-postgres");
+    let cache_a = scratch.path().join("lucivy_dist_a");
+    let cache_b = scratch.path().join("lucivy_dist_b");
 
     // ── Create two "machines" backed by same Postgres, different namespaces ──
 
@@ -506,12 +507,10 @@ fn test_bm25_scores_identical_across_shard_counts() {
     store.clear_index("score_1sh");
     store.clear_index("score_4sh");
 
-    let cache_0 = std::env::temp_dir().join("lucivy_score_0sh");
-    let cache_1 = std::env::temp_dir().join("lucivy_score_1sh");
-    let cache_4 = std::env::temp_dir().join("lucivy_score_4sh");
-    let _ = std::fs::remove_dir_all(&cache_0);
-    let _ = std::fs::remove_dir_all(&cache_1);
-    let _ = std::fs::remove_dir_all(&cache_4);
+    let scratch = common::scratch("acid-postgres");
+    let cache_0 = scratch.path().join("lucivy_score_0sh");
+    let cache_1 = scratch.path().join("lucivy_score_1sh");
+    let cache_4 = scratch.path().join("lucivy_score_4sh");
 
     // Config 0: single LucivyHandle (no sharding at all)
     let blob_dir_0 = lucivy_core::blob_directory::BlobDirectory::new(
@@ -677,10 +676,9 @@ fn test_distributed_bm25_ground_truth() {
     store.clear_index("dist_gt_a");
     store.clear_index("dist_gt_b");
 
-    let cache_a = std::env::temp_dir().join("lucivy_dist_gt_a");
-    let cache_b = std::env::temp_dir().join("lucivy_dist_gt_b");
-    let _ = std::fs::remove_dir_all(&cache_a);
-    let _ = std::fs::remove_dir_all(&cache_b);
+    let scratch = common::scratch("acid-postgres");
+    let cache_a = scratch.path().join("lucivy_dist_gt_a");
+    let cache_b = scratch.path().join("lucivy_dist_gt_b");
 
     let storage_a = lucivy_core::sharded_handle::BlobShardStorage::new(
         store.clone(), "dist_gt_a", &cache_a,

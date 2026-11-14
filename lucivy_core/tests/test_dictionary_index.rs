@@ -173,8 +173,8 @@ fn dir_bytes(dir: &Path) -> (u64, Vec<String>) {
 fn dictionary_index_answers_like_v3() {
     let files = corpus(300);
     eprintln!("corpus: {} files", files.len());
-    let base: PathBuf = std::env::temp_dir().join(format!("lucivy-dict-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
+    let scratch = common::scratch("lucivy-dict");
+    let base: PathBuf = scratch.path().to_path_buf();
     let h3 = build(&files, 3, &base.join("v3"));
     let h4 = build(&files, 4, &base.join("v4"));
 
@@ -219,7 +219,6 @@ fn dictionary_index_answers_like_v3() {
     }
     h3.close().unwrap();
     reopened.close().unwrap();
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// Debug: the pieces of a dictionary lookup, one by one.
@@ -230,8 +229,8 @@ fn dictionary_pieces() {
         ("b.c".to_string(), "spin_lock(&l); Mutex_lock(&m);".to_string()),
         ("c.c".to_string(), "printk(\"hello\"); schedule();".to_string()),
     ];
-    let base: PathBuf = std::env::temp_dir().join(format!("lucivy-dict-pieces-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
+    let scratch = common::scratch("lucivy-dict-pieces");
+    let base: PathBuf = scratch.path().to_path_buf();
     let h4 = build(&files, 4, &base.join("v4"));
     let content_f = h4.field("content").unwrap();
     let dict = h4.index.sfx_dictionary().expect("dictionary");
@@ -291,7 +290,6 @@ fn dictionary_pieces() {
     let (d, s) = run(&h4, Q { text: "mutex_lock", strict: false, distance: 0, anchor: false, exact: false, label: "relax" });
     eprintln!("query mutex_lock relax → docs {:?} spans {:?}", d, s);
     h4.close().unwrap();
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// The deferred fold (6 September 2026): a commit names its segments' pairs
@@ -302,8 +300,8 @@ fn dictionary_pieces() {
 #[test]
 fn deferred_fold_settles() {
     let files = corpus(400);
-    let base: PathBuf = std::env::temp_dir().join(format!("lucivy-dict-fold-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
+    let scratch = common::scratch("lucivy-dict-fold");
+    let base: PathBuf = scratch.path().to_path_buf();
     let dir = base.join("v4");
     let h4 = build(&files, 4, &dir);
 
@@ -357,7 +355,6 @@ fn deferred_fold_settles() {
         assert_eq!(d3, d4, "{} [{}] documents", q.text, q.label);
         assert_eq!(s3, s4, "{} [{}] spans", q.text, q.label);
     }
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// The derived group index (`dict-<g>.<field>.pidx`, 13 September) is
@@ -368,8 +365,8 @@ fn deferred_fold_settles() {
 #[test]
 fn reopened_without_group_index_rebuilds_it() {
     let files = corpus(300);
-    let base: PathBuf = std::env::temp_dir().join(format!("lucivy-dict-pidx-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
+    let scratch = common::scratch("lucivy-dict-pidx");
+    let base: PathBuf = scratch.path().to_path_buf();
     let dir = base.join("v4");
     let h4 = build(&files, 4, &dir);
     let before = h4.index.sfx_dictionary().unwrap().next_ids();
@@ -430,7 +427,6 @@ fn reopened_without_group_index_rebuilds_it() {
     }
     let now = pidx_files(&dir);
     assert!(now.iter().any(|n| !written.contains(n)), "no new generation wrote its group index: {now:?} (before: {written:?})");
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// The Bloom filter in front of the FST walks (6 September) is seeded from
@@ -440,8 +436,8 @@ fn reopened_without_group_index_rebuilds_it() {
 #[test]
 fn reopened_writer_mints_no_duplicate_ids() {
     let files = corpus(300);
-    let base: PathBuf = std::env::temp_dir().join(format!("lucivy-dict-reopen-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
+    let scratch = common::scratch("lucivy-dict-reopen");
+    let base: PathBuf = scratch.path().to_path_buf();
     let dir = base.join("v4");
     let h4 = build(&files, 4, &dir);
     let before = h4.index.sfx_dictionary().unwrap().next_ids();
@@ -488,5 +484,4 @@ fn reopened_writer_mints_no_duplicate_ids() {
         assert_eq!(d3, d4, "{} [{}] documents", q.text, q.label);
         assert_eq!(s3, s4, "{} [{}] spans", q.text, q.label);
     }
-    let _ = std::fs::remove_dir_all(&base);
 }

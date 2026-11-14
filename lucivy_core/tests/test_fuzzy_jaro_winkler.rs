@@ -8,6 +8,8 @@
 //! Levenshtein cannot tell apart, and a threshold of 0.99 keeps the exact
 //! word only.
 
+mod common;
+
 use lucivy_core::query::{QueryConfig, SchemaConfig};
 use lucivy_core::sharded_handle::ShardedHandle;
 
@@ -32,8 +34,8 @@ fn jaro_winkler_fuzzy_end_to_end() {
         "shards": 2
     }))
     .unwrap();
-    let dir = std::env::temp_dir().join("lucivy_fuzzy_jw");
-    let _ = std::fs::remove_dir_all(&dir);
+    let scratch = common::scratch("lucivy_fuzzy_jw");
+    let dir = scratch.path().to_path_buf();
     let h = ShardedHandle::create(dir.to_str().unwrap(), &config).unwrap();
 
     let docs = [

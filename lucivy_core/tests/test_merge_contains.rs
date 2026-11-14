@@ -1,6 +1,8 @@
 //! Test: index real repo files natively, trigger merge, verify contains search.
 //! This bypasses the Python binding to diagnose merge SFX issues directly.
 
+mod common;
+
 use lucivy_core::handle::LucivyHandle;
 use lucivy_core::query::{self, QueryConfig, SchemaConfig};
 use lucivy_core::directory::StdFsDirectory;
@@ -56,9 +58,8 @@ fn test_merge_contains_correctness() {
     eprintln!("Collected {} files, {} contain 'rag3weaver'", files.len(), rag3_count);
 
     // Create index in temp dir
-    let tmp_path = std::path::Path::new("/tmp/test_merge_contains_with");
-    let _ = std::fs::remove_dir_all(tmp_path);
-    std::fs::create_dir_all(tmp_path).unwrap();
+    let scratch = common::scratch("test_merge_contains_with");
+    let tmp_path = scratch.path();
     let config = SchemaConfig {
         fields: vec![
             query::FieldDef { name: "path".into(), field_type: "text".into(),
@@ -138,9 +139,8 @@ fn test_merge_contains_correctness() {
     }
 
     // Now test WITHOUT merge: create a second index, don't drain_merges
-    let tmp2_path = std::path::Path::new("/tmp/test_merge_contains_without");
-    let _ = std::fs::remove_dir_all(tmp2_path);
-    std::fs::create_dir_all(tmp2_path).unwrap();
+    let scratch2 = common::scratch("test_merge_contains_without");
+    let tmp2_path = scratch2.path();
     let dir2 = StdFsDirectory::open(tmp2_path).unwrap();
     let handle2 = LucivyHandle::create(dir2, &config).unwrap();
     {

@@ -1,6 +1,8 @@
 //! Test: import the playground .luce snapshot and search it natively.
 //! Same dataset as the browser playground — validates core search on real data.
 
+mod common;
+
 use lucivy_core::handle::LucivyHandle;
 use lucivy_core::query::{self, QueryConfig};
 use lucivy_core::snapshot;
@@ -33,9 +35,8 @@ fn test_luce_playground_search() {
     let data = std::fs::read(&luce_path).unwrap();
     eprintln!(".luce loaded: {} bytes", data.len());
 
-    let dest = std::path::Path::new("/tmp/test_luce_native_import");
-    let _ = std::fs::remove_dir_all(dest);
-    std::fs::create_dir_all(dest).unwrap();
+    let scratch = common::scratch("test_luce_native_import");
+    let dest = scratch.path();
 
     let handle = snapshot::import_index(&data, dest).unwrap();
     let ndocs = handle.reader.searcher().num_docs();

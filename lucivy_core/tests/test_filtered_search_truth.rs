@@ -6,6 +6,8 @@
 //! Scores are not compared: the document frequency a prescan reports may
 //! legitimately differ once the walk is pruned.
 
+mod common;
+
 use std::collections::{BTreeMap, HashSet};
 
 use lucivy_core::query::{QueryConfig, SchemaConfig};
@@ -15,7 +17,6 @@ const DOCS: u64 = 400;
 
 /// `sfx_version` 3 (an FST per segment) or 4 (a dictionary per shard).
 fn build(path: &str, sfx_version: u8) -> ShardedHandle {
-    let _ = std::fs::remove_dir_all(path);
     let config: SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [
             { "name": "path", "type": "text" },
@@ -68,7 +69,7 @@ fn q(json: &str) -> QueryConfig { serde_json::from_str(json).unwrap() }
 
 #[test]
 fn filtered_equals_unfiltered_intersected_with_allowed() {
-    filtered_equals_unfiltered("/tmp/lucivy_test_filtered_truth", 3);
+    filtered_equals_unfiltered("lucivy_test_filtered_truth", 3);
 }
 
 /// The same contract on a shard dictionary (`sfx_version` 4): the filter
@@ -76,11 +77,12 @@ fn filtered_equals_unfiltered_intersected_with_allowed() {
 /// alternatives do not see it.
 #[test]
 fn filtered_equals_unfiltered_intersected_with_allowed_on_dictionary() {
-    filtered_equals_unfiltered("/tmp/lucivy_test_filtered_truth_dict", 4);
+    filtered_equals_unfiltered("lucivy_test_filtered_truth_dict", 4);
 }
 
-fn filtered_equals_unfiltered(path: &str, sfx_version: u8) {
-    let index = build(path, sfx_version);
+fn filtered_equals_unfiltered(label: &str, sfx_version: u8) {
+    let scratch = common::scratch(label);
+    let index = build(scratch.path().to_str().unwrap(), sfx_version);
     let queries = [
         r#"{"type":"contains","field":"content","value":"kmalloc"}"#,
         r#"{"type":"contains","field":"content","value":"lock_init","strict_separators":true}"#,
@@ -161,7 +163,8 @@ fn scored(index: &ShardedHandle, q: &QueryConfig) -> Vec<(u64, f32)> {
 }
 
 /// Cost of a filtered search against the unfiltered one, on the 10 000-file
-/// kernel index `test_playground_parity` leaves in `/tmp/lucivy_parity_native`.
+/// kernel index `test_playground_parity` leaves in `/tmp/lucivy_parity_native`
+/// when run with `PARITY_DIR=/tmp/lucivy_parity_native`.
 /// `cargo test --release -p lucivy-core --test test_filtered_search_truth bench_filtered -- --ignored --nocapture`
 #[test]
 #[ignore]

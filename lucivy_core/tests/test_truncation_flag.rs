@@ -3,14 +3,16 @@
 //! through `last_search_truncated()`. The cap is read once per process, so
 //! this binary sets it before anything else runs.
 
+mod common;
+
 use lucivy_core::query::{QueryConfig, SchemaConfig};
 use lucivy_core::sharded_handle::ShardedHandle;
 
 #[test]
 fn a_capped_search_reports_it_and_a_normal_one_does_not() {
     std::env::set_var("LUCIVY_MAX_MATCHES_PER_SEGMENT", "40");
-    let dir = std::env::temp_dir().join("lucivy_truncation_flag");
-    let _ = std::fs::remove_dir_all(&dir);
+    let scratch = common::scratch("lucivy_truncation_flag");
+    let dir = scratch.path().to_path_buf();
     let config: SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [{"name": "content", "type": "text"}], "shards": 1
     })).unwrap();

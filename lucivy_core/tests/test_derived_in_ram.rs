@@ -178,8 +178,8 @@ fn compare(reference: &LucivyHandle, candidate: &LucivyHandle, what: &str) {
 fn derived_in_ram_answers_like_the_files() {
     let files = corpus(300);
     eprintln!("corpus: {} files", files.len());
-    let base: PathBuf = std::env::temp_dir().join(format!("lucivy-derived-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
+    let scratch = common::scratch("lucivy-derived");
+    let base: PathBuf = scratch.path().to_path_buf();
     let h3 = build(&files, 3, false, &base.join("v3"));
     let h3r = build(&files, 3, true, &base.join("v3-ram"));
     let h4r = build(&files, 4, true, &base.join("v4-ram"));
@@ -212,5 +212,4 @@ fn derived_in_ram_answers_like_the_files() {
     h3.close().unwrap();
     r3.close().unwrap();
     r4.close().unwrap();
-    let _ = std::fs::remove_dir_all(&base);
 }

@@ -6,6 +6,8 @@
 //! alone. All documents have the same length, so the average field length —
 //! the corpus's on purpose — does not enter the comparison.
 
+mod common;
+
 use lucivy_core::query::{QueryConfig, SchemaConfig};
 use lucivy_core::sharded_handle::ShardedHandle;
 use std::collections::{HashMap, HashSet};
@@ -59,7 +61,8 @@ fn one_shard_a_filtered_search_scores_like_the_subset_indexed_alone() { run(1) }
 fn two_shards_a_filtered_search_scores_like_the_subset_indexed_alone() { run(2) }
 
 fn run(shards: usize) {
-    let base = std::env::temp_dir().join(format!("lucivy-filtered-scores-{}-{shards}", std::process::id()));
+    let scratch = common::scratch(&format!("lucivy-filtered-scores-{shards}"));
+    let base = scratch.path().to_path_buf();
     let docs = corpus();
     let full = build(&base.join("full"), &docs, shards);
     let subset_docs: Vec<_> = docs.iter().filter(|(id, _)| *id < ALLOWED).cloned().collect();
@@ -83,6 +86,5 @@ fn run(shards: usize) {
     }
     full.close().unwrap();
     subset.close().unwrap();
-    let _ = std::fs::remove_dir_all(&base);
     assert!(differences.is_empty(), "{shards} shard(s): a filtered search does not score like its subset ({} differences):\n{}", differences.len(), differences.iter().step_by(10).cloned().collect::<Vec<_>>().join("\n"));
 }

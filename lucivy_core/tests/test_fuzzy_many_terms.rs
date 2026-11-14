@@ -15,6 +15,8 @@
 //! 0 and 1, word by word at distance 1) and fails when the 200-word fuzzy
 //! whole text takes longer than the budget.
 
+mod common;
+
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -26,11 +28,9 @@ use lucivy_core::sharded_handle::ShardedHandle;
 /// A 200-word text searched whole at distance 1, on two documents, must answer within this.
 const BUDGET_MS: u128 = 2_000;
 
-fn tmp_dir(name: &str) -> String {
-    let p = std::env::temp_dir().join(name);
-    let _ = std::fs::remove_dir_all(&p);
-    std::fs::create_dir_all(&p).unwrap();
-    p.to_str().unwrap().to_string()
+/// A fresh scratch directory: keep the guard alive as long as the index in it.
+fn tmp_dir(name: &str) -> tempfile::TempDir {
+    common::scratch(name)
 }
 
 /// The query: the distinct words of a page of French prose, three letters or
@@ -53,20 +53,21 @@ const DOCUMENTS: [&str; 2] = [
     include_str!("../../docs/13-09-2026/09-architecture.md"),
 ];
 
-fn index(name: &str) -> (ShardedHandle, Vec<String>) {
+fn index(name: &str) -> (tempfile::TempDir, ShardedHandle, Vec<String>) {
     let config: SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [{"name": "content", "type": "text", "stored": true}],
         "shards": 4
     }))
     .unwrap();
-    let handle = ShardedHandle::create(&tmp_dir(name), &config).unwrap();
+    let scratch = tmp_dir(name);
+    let handle = ShardedHandle::create(scratch.path().to_str().unwrap(), &config).unwrap();
     for (i, text) in DOCUMENTS.iter().enumerate() {
         handle
             .add_document_json(i as u64, &serde_json::json!({"content": text}))
             .unwrap();
     }
     handle.commit().unwrap();
-    (handle, query_words())
+    (scratch, handle, query_words())
 }
 
 fn whole(terms: &[String], distance: u8) -> QueryConfig {
@@ -95,7 +96,7 @@ fn time_ms(handle: &ShardedHandle, q: &QueryConfig, highlights: bool) -> (u128, 
 #[test]
 #[ignore = "timing witness: run with --release -- --ignored --nocapture"]
 fn fuzzy_query_cost_is_bounded_in_its_length() {
-    let (handle, words) = index("lucivy_fuzzy_many_terms_cost");
+    let (_scratch, handle, words) = index("lucivy_fuzzy_many_terms_cost");
     assert!(words.len() >= 200, "the page has {} distinct words, 200 are needed", words.len());
     let mut whole_d1_at_200 = 0;
     println!("words  chars  whole d=0  whole d=1  whole d=1+hl  by word d=1+hl   (ms)");
@@ -124,7 +125,7 @@ fn fuzzy_query_cost_is_bounded_in_its_length() {
 /// at distance 1 on four shards: the first document comes back, with a span.
 #[test]
 fn long_fuzzy_query_finds_its_passage() {
-    let (handle, _) = index("lucivy_fuzzy_many_terms_recall");
+    let (_scratch, handle, _) = index("lucivy_fuzzy_many_terms_recall");
     let text = DOCUMENTS[0];
     // A passage of plain prose (ASCII letters and spaces), long enough.
     let start = text.find("Le ").unwrap_or(0);
@@ -170,7 +171,8 @@ fn probe_exact_passage_lengths() {
         let config: SchemaConfig = serde_json::from_value(serde_json::json!({
             "fields": [{"name": "content", "type": "text", "stored": true}], "shards": shards
         })).unwrap();
-        let handle = ShardedHandle::create(&tmp_dir(&format!("lucivy_probe_{shards}")), &config).unwrap();
+        let scratch = tmp_dir(&format!("lucivy_probe_{shards}"));
+        let handle = ShardedHandle::create(scratch.path().to_str().unwrap(), &config).unwrap();
         for (i, text) in DOCUMENTS.iter().enumerate() {
             handle.add_document_json(i as u64, &serde_json::json!({"content": text})).unwrap();
         }
@@ -202,7 +204,8 @@ fn probe_first_failing_length() {
     let config: SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [{"name": "content", "type": "text", "stored": true}], "shards": 1
     })).unwrap();
-    let handle = ShardedHandle::create(&tmp_dir("lucivy_probe_first"), &config).unwrap();
+    let scratch = tmp_dir("lucivy_probe_first");
+    let handle = ShardedHandle::create(scratch.path().to_str().unwrap(), &config).unwrap();
     for (i, text) in DOCUMENTS.iter().enumerate() {
         handle.add_document_json(i as u64, &serde_json::json!({"content": text})).unwrap();
     }

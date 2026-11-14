@@ -3,21 +3,23 @@
 //! This test runs as a separate binary — the global scheduler is cold.
 //! Reproduces the bug where RR-4sh returns 0 hits when it's the first index.
 
+mod common;
+
 use std::sync::Arc;
 use lucivy_core::handle::{LucivyHandle, NODE_ID_FIELD};
 use lucivy_core::query::QueryConfig;
 use lucivy_core::sharded_handle::ShardedHandle;
 
-fn tmp_dir(name: &str) -> String {
-    let p = std::env::temp_dir().join(name);
-    let _ = std::fs::remove_dir_all(&p);
-    std::fs::create_dir_all(&p).unwrap();
-    p.to_str().unwrap().to_string()
+/// A fresh scratch directory and its path: keep the guard alive while the path is used.
+fn tmp_dir(name: &str) -> (tempfile::TempDir, String) {
+    let scratch = common::scratch(name);
+    let path = scratch.path().to_str().unwrap().to_string();
+    (scratch, path)
 }
 
 #[test]
 fn test_cold_rr_search() {
-    let dir = tmp_dir("lucivy_cold_rr");
+    let (_scratch, dir) = tmp_dir("lucivy_cold_rr");
     let config: lucivy_core::query::SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [
             {"name": "content", "type": "text", "stored": true}
@@ -50,7 +52,7 @@ fn test_cold_rr_search() {
 
 #[test]
 fn test_cold_ta_search() {
-    let dir = tmp_dir("lucivy_cold_ta");
+    let (_scratch, dir) = tmp_dir("lucivy_cold_ta");
     let config: lucivy_core::query::SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [
             {"name": "content", "type": "text", "stored": true}
@@ -83,7 +85,7 @@ fn test_cold_ta_search() {
 
 #[test]
 fn test_cold_rr_two_fields() {
-    let dir = tmp_dir("lucivy_cold_rr_2f");
+    let (_scratch, dir) = tmp_dir("lucivy_cold_rr_2f");
     let config: lucivy_core::query::SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [
             {"name": "path", "type": "text", "stored": true},
@@ -127,7 +129,7 @@ fn test_single_handle_highlights() {
     use lucivy_core::directory::StdFsDirectory;
     use lucivy_core::query::SchemaConfig;
 
-    let tmp = tmp_dir("lucivy_single_handle_highlights");
+    let (_scratch, tmp) = tmp_dir("lucivy_single_handle_highlights");
 
     let config: SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [

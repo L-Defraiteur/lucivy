@@ -5,6 +5,8 @@
 //! search restricted to the ids it returned, so the top-k still carries every
 //! span it would have had with an unbounded sink.
 
+mod common;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -20,7 +22,6 @@ const CAP: usize = 40;
 const TOP_K: usize = 10;
 
 fn build(path: &str) -> ShardedHandle {
-    let _ = std::fs::remove_dir_all(path);
     let config: SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [
             { "name": "path", "type": "text" },
@@ -64,7 +65,8 @@ fn highlights_of(index: &ShardedHandle, sink: &HighlightSink, results: &[lucivy_
 fn a_capped_sink_still_yields_complete_highlights_for_the_top_k() {
     // Also drives the sink `search_with_docs` builds by itself (read once per process).
     std::env::set_var("LUCIVY_HIGHLIGHT_SPAN_CAP", CAP.to_string());
-    let index = build("/tmp/lucivy_test_highlight_cap");
+    let scratch = common::scratch("lucivy_test_highlight_cap");
+    let index = build(scratch.path().to_str().unwrap());
 
     // Reference: unbounded sink.
     let full = Arc::new(HighlightSink::with_cap(usize::MAX));

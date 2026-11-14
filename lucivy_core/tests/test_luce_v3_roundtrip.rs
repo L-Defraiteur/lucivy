@@ -14,6 +14,8 @@
 //!   LUCE_ROOT=/tmp/linux-bench LUCE_LIST=/tmp/corpus_indexed.list LUCE_MAX_DOCS=3000 \
 //!   cargo test --release -p lucivy-core --test test_luce_v3_roundtrip -- --nocapture
 
+mod common;
+
 use lucivy_core::query::{QueryConfig, SchemaConfig};
 use lucivy_core::sharded_handle::ShardedHandle;
 use lucivy_core::snapshot;
@@ -97,8 +99,8 @@ fn luce_sharded_roundtrip(sfx_version: u8) {
         (0..h.num_shards()).map(|i| h.shard(i).unwrap().index.settings().sfx_version).collect()
     };
 
-    let dir = std::env::temp_dir().join(format!("lucivy_luce_v{sfx_version}_src"));
-    let _ = std::fs::remove_dir_all(&dir);
+    let scratch = common::scratch(&format!("lucivy_luce_v{sfx_version}"));
+    let dir = scratch.path().join("src");
     let h = ShardedHandle::create(dir.to_str().unwrap(), &config).unwrap();
 
     // A real corpus when the parity knobs are set, a synthetic one otherwise so
@@ -199,8 +201,7 @@ fn luce_sharded_roundtrip(sfx_version: u8) {
     h.close().unwrap();
 
     // ── Import into a fresh directory ───────────────────────────────────
-    let dest = std::env::temp_dir().join(format!("lucivy_luce_v{sfx_version}_dst"));
-    let _ = std::fs::remove_dir_all(&dest);
+    let dest = scratch.path().join("dst");
     std::fs::create_dir_all(&dest).unwrap();
     let t = std::time::Instant::now();
     let h2 = snapshot::import_from_snapshot(&blob, &dest).unwrap();
