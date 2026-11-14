@@ -70,7 +70,11 @@ fn purge_orphelins() {
         .map(|l| l.trim().parse().expect("un _node_id par ligne"))
         .collect();
     let champ = std::env::var("PURGE_CHAMP").unwrap_or_else(|_| "content".into());
-    let mots: Vec<String> = std::env::var("PURGE_MOTS").expect("PURGE_MOTS").split(',').map(str::to_string).collect();
+    // Sans mots (une table sans champ texte à interroger), le banc est sauté et le dit.
+    let mots: Vec<String> = std::env::var("PURGE_MOTS").unwrap_or_default().split(',').filter(|m| !m.is_empty()).map(str::to_string).collect();
+    if mots.is_empty() {
+        eprintln!("BANC sauté : PURGE_MOTS vide");
+    }
 
     if ids.is_empty() {
         eprintln!("BILAN {table} : aucun orphelin, rien n'est ouvert");
@@ -124,7 +128,7 @@ fn purge_orphelins() {
     assert!(ecarts.is_empty(), "[check: memes-hits-moins-les-orphelins] {ecarts:?}");
     assert_eq!(avant_docs - apres_docs, ids.len() as u64, "[check: le-compte-baisse-d-autant]");
     assert_eq!(rouvert, apres_docs, "[check: la-purge-survit-a-la-reouverture]");
-    assert!(!touches.is_empty(), "[check: le-banc-touche-des-orphelins] aucun orphelin dans le banc : le témoin ne prouverait rien");
+    assert!(mots.is_empty() || !touches.is_empty(), "[check: le-banc-touche-des-orphelins] aucun orphelin dans le banc : le témoin ne prouverait rien");
 }
 
 /// Le gain d'octets d'une purge : `compact` sur une COPIE de table (purgée, ou neuve comme témoin), le
@@ -138,7 +142,7 @@ fn purge_orphelins() {
 fn compacter() {
     let table = std::env::var("PURGE_TABLE").expect("PURGE_TABLE");
     let champ = std::env::var("PURGE_CHAMP").unwrap_or_else(|_| "content".into());
-    let mots: Vec<String> = std::env::var("PURGE_MOTS").expect("PURGE_MOTS").split(',').map(str::to_string).collect();
+    let mots: Vec<String> = std::env::var("PURGE_MOTS").unwrap_or_default().split(',').filter(|m| !m.is_empty()).map(str::to_string).collect();
     let max_docs: usize = std::env::var("COMPACT_MAX_DOCS").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000_000);
     let index = ShardedHandle::open(&table).unwrap();
     let docs = index.num_docs();
