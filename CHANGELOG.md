@@ -1,3 +1,20 @@
+Lucivy 4.3.7 — 14 November 2026
+================================
+
+One fix: the index format is unchanged.
+
+- **Fixed: a filtered search did not rank like its subset.** A search
+  restricted to `allowed_ids` is meant to score as if the index held only the
+  allowed documents (`with_subset_docs`): N is the subset's size, the document
+  frequencies are counted in the subset. But a reader filtered by
+  `set_alive_bitset` kept the whole segment's document count, so the subset was
+  sized as the whole index, and the IDF mixed the corpus's N with the subset's
+  frequencies: on 100 documents filtered to 10, a hit scored 2.26 where the 10
+  documents indexed alone give 0.047, for `term`, `contains`, `phrase` and
+  `parse` alike. `set_alive_bitset` now updates the reader's document count.
+  The matching documents were always the right ones; only their scores, and so
+  their order against other queries' scores, were off.
+
 Lucivy 4.3.6 — 13 November 2026
 ================================
 
