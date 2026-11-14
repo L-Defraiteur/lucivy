@@ -693,10 +693,16 @@ impl SegmentReader {
     /// Replace the alive bitset, intersecting with the existing one if present.
     /// Use this to inject a pre-filter (e.g. allowed node_ids → doc_id bitset).
     pub fn set_alive_bitset(&mut self, custom: AliveBitSet) {
-        self.alive_bitset_opt = Some(match self.alive_bitset_opt.take() {
+        let alive = match self.alive_bitset_opt.take() {
             Some(existing) => intersect_alive_bitsets(existing, custom),
             None => custom,
-        });
+        };
+        // `num_docs` is the number of alive documents: a filtered search sizes
+        // its subset from it (`with_subset_docs`), and a reader that kept the
+        // whole segment's count made the subset the whole index — its IDF then
+        // mixed the corpus's N with the subset's document frequencies.
+        self.num_docs = alive.num_alive_docs() as DocId;
+        self.alive_bitset_opt = Some(alive);
     }
 
     /// The document filter of a filtered search: the allowed ids' bitset,
