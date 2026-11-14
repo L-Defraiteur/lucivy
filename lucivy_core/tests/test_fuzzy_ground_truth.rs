@@ -9,6 +9,8 @@
 //! 2. Precision — no false positives
 //! 3. Highlights — stripped of separators, within Levenshtein distance
 
+mod common;
+
 use lucivy_core::handle::LucivyHandle;
 use lucivy_core::query::{self, QueryConfig, SchemaConfig};
 use lucivy_core::directory::StdFsDirectory;
@@ -336,9 +338,8 @@ fn test_fuzzy_ground_truth() {
     eprintln!("Collected {} files", files.len());
 
     // ── 1. Create index ──────────────────────────────────────────────
-    let tmp_path = std::path::Path::new("/tmp/test_fuzzy_ground_truth");
-    let _ = std::fs::remove_dir_all(tmp_path);
-    std::fs::create_dir_all(tmp_path).unwrap();
+    let scratch = common::scratch("test_fuzzy_ground_truth");
+    let tmp_path = scratch.path();
 
     let config = SchemaConfig {
         fields: vec![

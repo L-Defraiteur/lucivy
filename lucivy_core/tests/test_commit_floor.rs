@@ -4,6 +4,8 @@
 //!
 //!   cargo test --release -p lucivy-core --test test_commit_floor -- --ignored --nocapture
 
+mod common;
+
 use lucistore::blob_store::MemBlobStore;
 use lucivy_core::query::SchemaConfig;
 use lucivy_core::sharded_handle::{BlobShardStorage, RamShardStorage, ShardedHandle};
@@ -111,8 +113,10 @@ impl lucistore::blob_store::BlobStore for CountingStore {
 #[test]
 #[ignore]
 fn commit_floor_store_calls() {
+    // V3_SCRATCH wins; otherwise a scratch directory removed when the guard drops.
+    let scratch_dir = common::scratch("commit-floor");
     let scratch = std::env::var("V3_SCRATCH")
-        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+        .unwrap_or_else(|_| scratch_dir.path().to_string_lossy().to_string());
     let cache = format!("{scratch}/commit_floor_calls_cache");
     let _ = std::fs::remove_dir_all(&cache);
     let store = Arc::new(CountingStore::new());
@@ -147,8 +151,10 @@ fn commit_floor_store_calls() {
 #[test]
 #[ignore]
 fn commit_floor_profile_reopen() {
+    // V3_SCRATCH wins; otherwise a scratch directory removed when the guard drops.
+    let scratch_dir = common::scratch("commit-floor");
     let scratch = std::env::var("V3_SCRATCH")
-        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+        .unwrap_or_else(|_| scratch_dir.path().to_string_lossy().to_string());
     let cache = format!("{scratch}/commit_floor_reopen_cache");
     let _ = std::fs::remove_dir_all(&cache);
     let store = Arc::new(MemBlobStore::new());
@@ -186,8 +192,10 @@ fn commit_floor_profile_reopen() {
 #[test]
 #[ignore]
 fn commit_floor_profile_blob() {
+    // V3_SCRATCH wins; otherwise a scratch directory removed when the guard drops.
+    let scratch_dir = common::scratch("commit-floor");
     let scratch = std::env::var("V3_SCRATCH")
-        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+        .unwrap_or_else(|_| scratch_dir.path().to_string_lossy().to_string());
     let cache = format!("{scratch}/commit_floor_cache");
     for shards in [2u32, 4] {
         for n in [1u64, 9, 90, 900] {

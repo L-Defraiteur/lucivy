@@ -9,7 +9,7 @@
 //! - strict_sep=false: grep strips non-content chars from both query and text
 //!
 //! Run: cargo test -p lucivy-core --test test_sfx_v3_ground_truth -- --nocapture
-//! Output: /tmp/v3_ground_truth_report.txt
+//! Output: v3_ground_truth_report.txt under `common::report_path` (the target's tmp dir)
 
 mod common;
 
@@ -75,7 +75,9 @@ fn commit_every(default: usize) -> usize {
 }
 
 const MAX_FILE_SIZE: u64 = 100_000;
-const REPORT_PATH: &str = "/tmp/v3_ground_truth_report.txt";
+fn ground_truth_report() -> String {
+    common::report_path("v3_ground_truth_report.txt").display().to_string()
+}
 
 // ─── Content char (mirrors tokenizer::equal_chunk::is_content_char) ──────
 
@@ -935,7 +937,7 @@ fn v3_ground_truth_contains() {
     let index_time = t0.elapsed().as_secs_f64();
     eprintln!("Index time: {:.1}s", index_time);
 
-    let mut report = std::fs::File::create(REPORT_PATH).unwrap();
+    let mut report = std::fs::File::create(ground_truth_report()).unwrap();
     writeln!(report, "V3 Ground Truth Report — {} files, indexed in {:.1}s\n", files.len(), index_time).ok();
 
     // Each query tested in both modes:
@@ -1054,7 +1056,7 @@ fn v3_ground_truth_demo() {
     let index_time = t0.elapsed().as_secs_f64();
     eprintln!("Index time: {:.1}s ({:.0} docs/s)", index_time, files.len() as f64 / index_time);
 
-    let mut report = std::fs::File::create(REPORT_PATH).unwrap();
+    let mut report = std::fs::File::create(ground_truth_report()).unwrap();
     writeln!(report, "V3 Demo Panel — {} files, indexed in {:.1}s\n", files.len(), index_time).ok();
 
     // One row per thing the engine does that a tokenizer cannot. Every value
@@ -1101,7 +1103,7 @@ fn v3_ground_truth_coherence() {
     let files = collect_files(5000);
     if files.is_empty() { return; }
     let handle = create_v3_index(&files);
-    let mut report = std::fs::File::create("/tmp/v3_coherence_report.txt").unwrap();
+    let mut report = std::fs::File::create(common::report_path("v3_coherence_report.txt")).unwrap();
     let q = |t: &'static str, m: &str| GroundTruthQuery::from_mode(t, m).unwrap();
     let queries = query_spec().unwrap_or_else(|| vec![
         // Long literals with separators, strict and relaxed
@@ -1267,13 +1269,14 @@ fn run_panel(
     }
 
     eprintln!("\n{pass} pass, {fail} fail");
-    eprintln!("Report: {REPORT_PATH}");
+    eprintln!("Report: {}", ground_truth_report());
 
     // Export failures to JSON for diag pass
     if !fail_entries.is_empty() {
         let json = serde_json::to_string_pretty(&fail_entries).unwrap();
-        std::fs::write("/tmp/v3_ground_truth_fails.json", &json).ok();
-        eprintln!("Failures exported: /tmp/v3_ground_truth_fails.json");
+        let fails_path = common::report_path("v3_ground_truth_fails.json");
+        std::fs::write(&fails_path, &json).ok();
+        eprintln!("Failures exported: {}", fails_path.display());
     }
 
     // V3_DIAG=1: re-test FN docs in isolation for each failing query
@@ -1336,7 +1339,7 @@ fn run_panel(
                     }).collect::<Vec<_>>(),
                 })
             }).collect();
-            let trace_path = format!("/tmp/v3_trace_{}_{}.json", query.replace("::", "_").replace(" ", "_"), mode);
+            let trace_path = common::report_path(&format!("v3_trace_{}_{}.json", query.replace("::", "_").replace(" ", "_"), mode)).display().to_string();
             let json = serde_json::to_string_pretty(&trace_json).unwrap();
             std::fs::write(&trace_path, &json).ok();
             let total_events: usize = traces.iter().map(|(_, t)| t.events.len()).sum();
@@ -1409,8 +1412,8 @@ fn run_panel(
                     }));
                 }
 
-                let dag_path = format!("/tmp/v3_dag_{}_{}.json",
-                    query.replace("::", "_").replace(" ", "_"), mode);
+                let dag_path = common::report_path(&format!("v3_dag_{}_{}.json",
+                    query.replace("::", "_").replace(" ", "_"), mode)).display().to_string();
                 let json = serde_json::to_string_pretty(&dag_explains).unwrap();
                 std::fs::write(&dag_path, &json).ok();
                 eprintln!("  DAG explain: {dag_path} ({} segments)", dag_explains.len());
@@ -1639,8 +1642,8 @@ fn run_panel(
                     forensics.push(doc_forensic);
                 }
 
-                let forensics_path = format!("/tmp/v3_forensics_{}_{}.json",
-                    query.replace("::", "_").replace(" ", "_"), mode);
+                let forensics_path = common::report_path(&format!("v3_forensics_{}_{}.json",
+                    query.replace("::", "_").replace(" ", "_"), mode)).display().to_string();
                 let json = serde_json::to_string_pretty(&forensics).unwrap();
                 std::fs::write(&forensics_path, &json).ok();
                 eprintln!("  Forensics: {forensics_path}");
@@ -1648,7 +1651,7 @@ fn run_panel(
         }
     }
 
-    assert_eq!(fail, 0, "ground truth mismatch — see {REPORT_PATH}");
+    assert_eq!(fail, 0, "ground truth mismatch — see {}", ground_truth_report());
 }
 
 /// Debug targeted: for a specific query, dump chains + matches for FP docs.
@@ -1669,7 +1672,7 @@ fn debug_struct_fp() {
     eprintln!("\n=== DEBUG struct strict ===");
     eprintln!("grep={} v3={} FP={}", grep_set.len(), v3_result.doc_indices.len(), fp_docs.len());
 
-    let mut dbg = std::fs::File::create("/tmp/v3_debug_struct.txt").unwrap();
+    let mut dbg = std::fs::File::create(common::report_path("v3_debug_struct.txt")).unwrap();
     writeln!(dbg, "FP docs for '{}' strict: {} docs\n", query, fp_docs.len()).ok();
 
     for &doc_idx in &fp_docs {
@@ -1717,7 +1720,7 @@ fn debug_struct_fp() {
         }
         writeln!(dbg).ok();
     }
-    eprintln!("Debug output: /tmp/v3_debug_struct.txt");
+    eprintln!("Debug output: {}", common::report_path("v3_debug_struct.txt").display());
 }
 
 // ─── Fuzzy / Regex baseline ─────────────────────────────────────────────
@@ -1855,7 +1858,8 @@ fn grep_docs_regex(files: &[(String, String)], pattern: &str) -> HashSet<usize> 
 fn gt_cache_path() -> String {
     let key: String = repo_path().chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
-    format!("/tmp/v3_fuzzy_regex_gt_{}_{}.json", key, max_docs(500))
+    // A cache kept between runs, next to the reports (not in /tmp).
+    common::report_path(&format!("v3_fuzzy_regex_gt_{}_{}.json", key, max_docs(500))).display().to_string()
 }
 
 /// Compute or load cached ground truth for fuzzy/regex queries.
@@ -2028,7 +2032,7 @@ fn baseline_fuzzy_regex() {
             let fns: Vec<usize> = grep_set.difference(&v3_result.doc_indices).copied().collect();
             let fps: Vec<usize> = v3_result.doc_indices.difference(&grep_set).copied().collect();
             let safe_label = label.replace(|c: char| !c.is_alphanumeric(), "_");
-            let path = format!("/tmp/v3_baseline_{}_{}.json", safe_label, qtype);
+            let path = common::report_path(&format!("v3_baseline_{}_{}.json", safe_label, qtype)).display().to_string();
             let json = serde_json::json!({
                 "query": value,
                 "type": qtype,
@@ -2561,7 +2565,9 @@ fn v3_sharded_filter_delete_delta() {
 
     let files = collect_files(2000);
     if files.is_empty() { return; }
-    let scratch = std::env::var("V3_SCRATCH").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+    // V3_SCRATCH wins; otherwise a scratch directory removed when the guard drops.
+    let scratch_dir = common::scratch("sfx-v3-gt");
+    let scratch = std::env::var("V3_SCRATCH").unwrap_or_else(|_| scratch_dir.path().to_string_lossy().to_string());
     let src_dir = format!("{scratch}/v3_fdd_src");
     let dst_dir = format!("{scratch}/v3_fdd_dst");
     let _ = std::fs::remove_dir_all(&src_dir);

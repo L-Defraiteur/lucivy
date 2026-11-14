@@ -11,6 +11,8 @@
 //! The repo root defaults to the rag3db parent directory (packages/rag3db/).
 //! Set RAG3DB_ROOT env var to override.
 
+mod common;
+
 use lucivy_core::handle::LucivyHandle;
 use lucivy_core::query::{self, QueryConfig, SchemaConfig};
 use lucivy_core::directory::StdFsDirectory;
@@ -48,22 +50,9 @@ fn is_binary_content(content: &[u8]) -> bool {
 }
 
 /// Collect files from the rag3db repo, matching the playground's exact filtering.
-/// Uses RAG3DB_ROOT env var, or clones from GitHub to /tmp/test_rag3db_clone.
+/// Uses RAG3DB_ROOT env var, or a clone kept by `common::rag3db_clone`.
 fn collect_repo_files() -> Vec<(String, String)> {
-    let root = if let Ok(path) = std::env::var("RAG3DB_ROOT") {
-        std::path::PathBuf::from(path)
-    } else {
-        let clone_path = std::path::Path::new("/tmp/test_rag3db_clone");
-        if !clone_path.exists() {
-            eprintln!("Cloning https://github.com/L-Defraiteur/rag3db.git ...");
-            let status = std::process::Command::new("git")
-                .args(&["clone", "--depth", "1", "https://github.com/L-Defraiteur/rag3db.git", clone_path.to_str().unwrap()])
-                .status()
-                .expect("git clone failed");
-            assert!(status.success(), "git clone failed");
-        }
-        clone_path.to_path_buf()
-    };
+    let root = common::rag3db_clone();
 
     eprintln!("Indexing from: {}", root.display());
 
@@ -135,9 +124,8 @@ fn test_playground_repro() {
     eprintln!("Has 'librag3weaver' in content: {}", has_librag3weaver);
 
     // ── Create index exactly like the playground ──
-    let tmp_path = std::path::Path::new("/tmp/test_playground_repro");
-    let _ = std::fs::remove_dir_all(tmp_path);
-    std::fs::create_dir_all(tmp_path).unwrap();
+    let scratch = common::scratch("test_playground_repro");
+    let tmp_path = scratch.path();
 
     let config = SchemaConfig {
         fields: vec![

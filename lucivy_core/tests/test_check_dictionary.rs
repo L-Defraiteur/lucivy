@@ -1,5 +1,7 @@
 //! `check_dictionary`: words a shard dictionary lost before 4.3.5.
 
+mod common;
+
 use lucivy_core::directory::StdFsDirectory;
 use lucivy_core::handle::LucivyHandle;
 use lucivy_core::query::{self, SchemaConfig};
@@ -18,11 +20,11 @@ fn config(sfx_version: Option<u8>) -> SchemaConfig {
     }
 }
 
-fn temp(name: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!("lucivy-check-dictionary-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&path);
-    std::fs::create_dir_all(&path).unwrap();
-    path
+/// A scratch directory for one test: keep the guard alive while the path is used.
+fn temp(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let scratch = common::scratch(&format!("check-dictionary-{name}"));
+    let path = scratch.path().to_path_buf();
+    (scratch, path)
 }
 
 /// Two commits, each folded into its own dictionary generation.
@@ -48,7 +50,7 @@ fn two_folded_batches(handle: &LucivyHandle) {
 
 #[test]
 fn a_healthy_index_needs_no_rebuild() {
-    let dir = temp("healthy");
+    let (_scratch, dir) = temp("healthy");
     let handle = LucivyHandle::create(StdFsDirectory::open(&dir).unwrap(), &config(None)).unwrap();
     two_folded_batches(&handle);
     let check = handle.check_dictionary().unwrap();
@@ -60,12 +62,11 @@ fn a_healthy_index_needs_no_rebuild() {
     assert!(!check.needs_rebuild());
     assert!(check.summary().starts_with("No lost word"), "{}", check.summary());
     drop(handle);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn an_index_without_shard_dictionary_is_not_concerned() {
-    let dir = temp("v3");
+    let (_scratch, dir) = temp("v3");
     let handle = LucivyHandle::create(StdFsDirectory::open(&dir).unwrap(), &config(Some(3))).unwrap();
     two_folded_batches(&handle);
     let check = handle.check_dictionary().unwrap();
@@ -73,7 +74,6 @@ fn an_index_without_shard_dictionary_is_not_concerned() {
     assert!(!check.needs_rebuild());
     assert!(check.summary().contains("no shard dictionary"), "{}", check.summary());
     drop(handle);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The loss, reproduced on disk: the words of the second batch are in the
@@ -81,7 +81,7 @@ fn an_index_without_shard_dictionary_is_not_concerned() {
 /// being folded. The segments still reference them.
 #[test]
 fn lost_words_are_counted_and_call_for_a_rebuild() {
-    let dir = temp("lost");
+    let (_scratch, dir) = temp("lost");
     {
         let handle = LucivyHandle::create(StdFsDirectory::open(&dir).unwrap(), &config(None)).unwrap();
         two_folded_batches(&handle);
@@ -103,12 +103,11 @@ fn lost_words_are_counted_and_call_for_a_rebuild() {
     let summary = check.summary();
     assert!(summary.contains("Rebuild this index") && summary.contains("content ("), "{summary}");
     drop(handle);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_sharded_index_is_checked_shard_by_shard() {
-    let dir = temp("sharded");
+    let (_scratch, dir) = temp("sharded");
     let config: SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [{ "name": "content", "type": "text" }],
         "shards": 2
@@ -124,7 +123,6 @@ fn a_sharded_index_is_checked_shard_by_shard() {
     assert_eq!(check.unknown(), 0, "{check:?}");
     index.close().unwrap();
     drop(index);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The index saved on 13 November 2026 (`LUCIVY_LOST_WORDS_INDEX`, a fresh

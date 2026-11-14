@@ -3,6 +3,8 @@
 //! Indexes real repo files, runs regex queries, validates results
 //! against brute-force scan, and reports timing.
 
+mod common;
+
 use lucivy_core::handle::LucivyHandle;
 use lucivy_core::query::{self, QueryConfig, SchemaConfig};
 use lucivy_core::directory::StdFsDirectory;
@@ -77,9 +79,8 @@ fn test_regex_ground_truth() {
     eprintln!("Collected {} files", files.len());
 
     // ── 1. Create index ────────────────────────────────────────────────
-    let tmp_path = std::path::Path::new("/tmp/test_regex_ground_truth");
-    let _ = std::fs::remove_dir_all(tmp_path);
-    std::fs::create_dir_all(tmp_path).unwrap();
+    let scratch = common::scratch("test_regex_ground_truth");
+    let tmp_path = scratch.path();
 
     let config = SchemaConfig {
         fields: vec![

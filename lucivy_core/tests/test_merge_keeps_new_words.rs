@@ -8,6 +8,8 @@
 //! dictionary generation. A fuzzy `contains` then dropped every document using
 //! them (the text window cannot be rebuilt), while d=0 kept them.
 
+mod common;
+
 use lucivy_core::directory::StdFsDirectory;
 use lucivy_core::handle::LucivyHandle;
 use lucivy_core::query::{self, QueryConfig, SchemaConfig};
@@ -42,9 +44,8 @@ fn a_merge_between_commits_keeps_the_new_segments_words() { run(true) }
 fn without_a_merge_the_new_segments_words_are_found() { run(false) }
 
 fn run(merge: bool) {
-    let path = std::env::temp_dir().join(format!("lucivy-merge-new-words-{}-{merge}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&path);
-    std::fs::create_dir_all(&path).unwrap();
+    let scratch = common::scratch(&format!("lucivy-merge-new-words-{merge}"));
+    let path = scratch.path().to_path_buf();
     let config = SchemaConfig {
         fields: vec![query::FieldDef { name: "content".into(), field_type: "text".into(),
             stored: Some(true), indexed: Some(true), fast: None }],
@@ -92,5 +93,4 @@ fn run(merge: bool) {
     assert_eq!(contents(&handle, "quokkaword", 1), new_docs,
         "d=1 after reopening: a document whose words are in no dictionary generation is dropped by fuzzy");
     drop(handle);
-    let _ = std::fs::remove_dir_all(&path);
 }

@@ -8,6 +8,8 @@
 //! version: 4.0 reads 3.0.x, the first commit in 4.0 converts, 3.0.x does
 //! not read 4.0.
 
+mod common;
+
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -77,8 +79,8 @@ fn magics(dir: &Path) -> Vec<(String, String)> {
 }
 
 fn check(name: &str) {
-    let base: PathBuf = std::env::temp_dir().join(format!("lucivy-compat-308-{}-{}", name, std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
+    let scratch = common::scratch(&format!("lucivy-compat-308-{name}"));
+    let base: PathBuf = scratch.path().to_path_buf();
     copy_dir(&fixture_root().join(name), &base);
     let shard_dirs: Vec<PathBuf> = std::fs::read_dir(&base).unwrap().flatten()
         .map(|e| e.path()).filter(|p| p.is_dir()).collect();
@@ -175,7 +177,6 @@ fn check(name: &str) {
     let (d, s) = run(&h2, &marker_q);
     assert_eq!((d, s), (new_ids, expected), "{name}: the marker after reopen");
     h2.close().unwrap();
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]

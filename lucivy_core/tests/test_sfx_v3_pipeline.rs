@@ -1,6 +1,8 @@
 //! Minimal E2E test: SFX v3 pipeline through Index + IndexWriter directly.
 //! Creates index with sfx_version=3, indexes docs, verifies search works.
 
+mod common;
+
 use std::sync::Arc;
 use lucivy_core::handle::{LucivyHandle, NODE_ID_FIELD};
 use lucivy_core::query::{self, QueryConfig, SchemaConfig};
@@ -488,7 +490,7 @@ fn v3_span_relaxed_starts_at_content() {
 
 #[test]
 fn v3_span_relaxed_real_file_head() {
-    let doc = std::fs::read_to_string("/tmp/s3fs_head.txt").unwrap_or_default();
+    let doc = std::fs::read_to_string(std::env::var("V3_S3FS_HEAD").unwrap_or_default()).unwrap_or_default();
     if doc.is_empty() { return; }
     let handle = make_handle(&[&doc]);
     let spans = spans_for(&handle, "uint64_t", false);
@@ -501,8 +503,8 @@ fn v3_span_relaxed_real_file_head() {
 
 #[test]
 fn v3_span_relaxed_two_real_files() {
-    let a = std::fs::read_to_string("/tmp/s3fs_head.txt").unwrap_or_default();
-    let b = std::fs::read_to_string("/tmp/cfm_head.txt").unwrap_or_default();
+    let a = std::fs::read_to_string(std::env::var("V3_S3FS_HEAD").unwrap_or_default()).unwrap_or_default();
+    let b = std::fs::read_to_string(std::env::var("V3_CFM_HEAD").unwrap_or_default()).unwrap_or_default();
     if a.is_empty() || b.is_empty() { return; }
     let handle = make_handle(&[&a, &b]);
     let spans = spans_for(&handle, "uint64_t", false);
@@ -835,11 +837,11 @@ fn v3_merge_bisect() {
     }
     eprintln!("MINIMAL: {} other docs", others.len());
     for (i, d) in others.iter().enumerate() {
-        let p = format!("/tmp/bisect_other_{i}.txt");
+        let p = common::report_path(&format!("bisect_other_{i}.txt"));
         std::fs::write(&p, d).unwrap();
-        eprintln!("  {p} ({} bytes)", d.len());
+        eprintln!("  {} ({} bytes)", p.display(), d.len());
     }
-    std::fs::write("/tmp/bisect_target.txt", &target_text).unwrap();
+    std::fs::write(common::report_path("bisect_target.txt"), &target_text).unwrap();
 }
 
 #[test]
@@ -888,7 +890,7 @@ fn v3_span_non_ascii_neighbours() {
 #[test]
 #[ignore]
 fn v3_a2_probe() {
-    let full = std::fs::read_to_string("/tmp/a2_line.txt").unwrap();
+    let full = std::fs::read_to_string(std::env::var("V3_A2_LINE").expect("V3_A2_LINE: the file of the line to probe")).unwrap();
     let chars: Vec<char> = full.chars().collect();
     let q = "__init";
     for cut in 0..chars.len() {
@@ -905,7 +907,7 @@ fn v3_a2_probe() {
 #[ignore]
 fn v3_a2_chunks() {
     use ld_lucivy::tokenizer::equal_chunk::{segment_and_chunk, DEFAULT_MAX_TOKEN};
-    let full = std::fs::read_to_string("/tmp/a2_line.txt").unwrap();
+    let full = std::fs::read_to_string(std::env::var("V3_A2_LINE").expect("V3_A2_LINE: the file of the line to probe")).unwrap();
     let chars: Vec<char> = full.chars().collect();
     for cut in [0usize, 1] {
         let doc: String = chars[cut..].iter().collect();
@@ -1293,7 +1295,9 @@ fn search_fuzzy_docs(handle: &LucivyHandle, value: &str, distance: u8) -> usize 
 ///    returns the union, and `query_warnings` names the v2 segments.
 #[test]
 fn v3_migration_from_v2_index() {
-    let scratch = std::env::var("V3_SCRATCH").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+    // V3_SCRATCH wins; otherwise a scratch directory removed when the guard drops.
+    let scratch_dir = common::scratch("sfx-v3-pipeline");
+    let scratch = std::env::var("V3_SCRATCH").unwrap_or_else(|_| scratch_dir.path().to_string_lossy().to_string());
     let dir_path = format!("{scratch}/v3_migration");
     let _ = std::fs::remove_dir_all(&dir_path);
     std::fs::create_dir_all(&dir_path).unwrap();

@@ -6,6 +6,8 @@
 //! verification measured — 0 for the exact text, 1 for one edit — and does
 //! not depend on how many token boundaries the query crosses.
 
+mod common;
+
 use lucivy_core::query::{QueryConfig, SchemaConfig};
 use lucivy_core::sharded_handle::ShardedHandle;
 
@@ -16,8 +18,8 @@ fn levenshtein_tier_is_the_verified_edit_distance() {
     let config: SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [{"name": "content", "type": "text"}], "shards": 2
     })).unwrap();
-    let dir = std::env::temp_dir().join("lucivy_fuzzy_tiers");
-    let _ = std::fs::remove_dir_all(&dir);
+    let scratch = common::scratch("lucivy_fuzzy_tiers");
+    let dir = scratch.path().to_path_buf();
     let h = ShardedHandle::create(dir.to_str().unwrap(), &config).unwrap();
     let docs = [
         (1u64, "-- Test for various ALTER statements"),   // exact, 3 boundaries

@@ -3,6 +3,8 @@
 //! a handle still references it stays readable through that handle (unlink
 //! semantics, what a searcher holding merged-away segments relies on).
 
+mod common;
+
 use ld_lucivy::directory::{Directory, TerminatingWrite};
 use ld_lucivy::HasLen;
 use lucivy_core::directory::StdFsDirectory;
@@ -17,8 +19,8 @@ fn write_file(dir: &StdFsDirectory, name: &str, data: &[u8]) {
 
 #[test]
 fn lazy_handle_reads_ranges_and_whole_files() {
-    let tmp = std::env::temp_dir().join("lucivy_lazy_dir_ranges");
-    let _ = std::fs::remove_dir_all(&tmp);
+    let scratch = common::scratch("lucivy_lazy_dir_ranges");
+    let tmp = scratch.path().to_path_buf();
     let dir = StdFsDirectory::open(&tmp).unwrap();
     let data: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
     write_file(&dir, "big.bin", &data);
@@ -37,8 +39,8 @@ fn lazy_handle_reads_ranges_and_whole_files() {
 
 #[test]
 fn deleted_file_stays_readable_through_a_live_handle() {
-    let tmp = std::env::temp_dir().join("lucivy_lazy_dir_unlink");
-    let _ = std::fs::remove_dir_all(&tmp);
+    let scratch = common::scratch("lucivy_lazy_dir_unlink");
+    let tmp = scratch.path().to_path_buf();
     let dir = StdFsDirectory::open(&tmp).unwrap();
     let data = b"segment bytes a merge is about to replace".to_vec();
     write_file(&dir, "seg.sfx", &data);
@@ -60,8 +62,8 @@ fn deleted_file_stays_readable_through_a_live_handle() {
 
 #[test]
 fn rewritten_file_is_not_served_from_the_old_cache_entry() {
-    let tmp = std::env::temp_dir().join("lucivy_lazy_dir_rewrite");
-    let _ = std::fs::remove_dir_all(&tmp);
+    let scratch = common::scratch("lucivy_lazy_dir_rewrite");
+    let tmp = scratch.path().to_path_buf();
     let dir = StdFsDirectory::open(&tmp).unwrap();
     dir.atomic_write(Path::new("meta.json"), b"v1").unwrap();
     let h1 = dir.open_read(Path::new("meta.json")).unwrap();

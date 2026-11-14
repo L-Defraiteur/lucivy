@@ -12,6 +12,8 @@
 //!   SERVED_MAX_DOCS=3000 \
 //!   cargo test --release -p lucivy-core --test test_snapshot_served -- --nocapture
 
+mod common;
+
 use lucivy_core::query::{QueryConfig, SchemaConfig};
 use lucivy_core::sharded_handle::ShardedHandle;
 use lucivy_core::snapshot;
@@ -68,8 +70,8 @@ fn snapshot_served_answers_like_the_index_it_came_from() {
     }))
     .unwrap();
 
-    let dir = std::env::temp_dir().join("lucivy_served_src");
-    let _ = std::fs::remove_dir_all(&dir);
+    let scratch = common::scratch("lucivy_served_src");
+    let dir = scratch.path().to_path_buf();
     let h = ShardedHandle::create(dir.to_str().unwrap(), &config).unwrap();
 
     let docs: Vec<(String, String, String)> =

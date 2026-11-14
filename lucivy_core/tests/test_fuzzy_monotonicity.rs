@@ -5,6 +5,8 @@
 //! 2. Synthetic SKU test: random alphanumeric codes in documents, verified
 //!    that fuzzy search finds them all (simulates product catalog RAG)
 
+mod common;
+
 use lucivy_core::handle::LucivyHandle;
 use lucivy_core::query::{self, QueryConfig, SchemaConfig};
 use lucivy_core::directory::StdFsDirectory;
@@ -15,20 +17,7 @@ use std::collections::HashSet;
 // ═══════════════════════════════════════════════════════════════════════
 
 fn collect_repo_files() -> Vec<(String, String)> {
-    let root = if let Ok(path) = std::env::var("RAG3DB_ROOT") {
-        std::path::PathBuf::from(path)
-    } else {
-        let clone_path = std::path::Path::new("/tmp/test_rag3db_clone");
-        if !clone_path.exists() {
-            eprintln!("Cloning rag3db...");
-            let status = std::process::Command::new("git")
-                .args(&["clone", "--depth", "1", "https://github.com/L-Defraiteur/rag3db.git",
-                    clone_path.to_str().unwrap()])
-                .status().expect("git clone failed");
-            assert!(status.success());
-        }
-        clone_path.to_path_buf()
-    };
+    let root = common::rag3db_clone();
 
     let exclude = vec![".git"];
     let mut files = Vec::new();
@@ -79,14 +68,15 @@ fn walk(dir: &std::path::Path, exclude: &[&str], files: &mut Vec<(String, String
     }
 }
 
-fn build_index(files: &[(String, String)], drain: bool) -> (LucivyHandle, ld_lucivy::schema::Field) {
-    let tmp = if drain {
-        std::path::PathBuf::from("/tmp/test_monotonicity_drained")
+/// The index, its content field, and the scratch directory it lives in
+/// (keep the guard alive as long as the handle).
+fn build_index(files: &[(String, String)], drain: bool) -> (tempfile::TempDir, LucivyHandle, ld_lucivy::schema::Field) {
+    let scratch = if drain {
+        common::scratch("test_monotonicity_drained")
     } else {
-        std::path::PathBuf::from("/tmp/test_monotonicity_segments")
+        common::scratch("test_monotonicity_segments")
     };
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
+    let tmp = scratch.path().to_path_buf();
 
     let config = SchemaConfig {
         fields: vec![
@@ -122,7 +112,7 @@ fn build_index(files: &[(String, String)], drain: bool) -> (LucivyHandle, ld_luc
     eprintln!("Index: {} docs, {} segments (drain={})",
         searcher.num_docs(), searcher.segment_readers().len(), drain);
 
-    (handle, content_field)
+    (scratch, handle, content_field)
 }
 
 fn make_contains_config(query_text: &str, distance: u8) -> QueryConfig {
@@ -188,7 +178,7 @@ fn test_monotonicity_real_repo() {
     eprintln!("Collected {} files", files.len());
 
     // Build with multiple segments (like WASM playground — no drain)
-    let (handle, _) = build_index(&files, false);
+    let (_scratch, handle, _) = build_index(&files, false);
 
     // Edge-case queries: cross-token substrings, mid-token starts/ends
     let queries = vec![
@@ -365,9 +355,8 @@ fn test_fuzzy_sku_catalog() {
     }
 
     // Build index
-    let tmp = std::path::Path::new("/tmp/test_sku_fuzzy");
-    let _ = std::fs::remove_dir_all(tmp);
-    std::fs::create_dir_all(tmp).unwrap();
+    let scratch = common::scratch("test_sku_fuzzy");
+    let tmp = scratch.path();
 
     let config = SchemaConfig {
         fields: vec![
@@ -495,9 +484,8 @@ fn test_fuzzy_long_api_keys() {
     }
 
     // Build index
-    let tmp = std::path::Path::new("/tmp/test_apikey_fuzzy");
-    let _ = std::fs::remove_dir_all(tmp);
-    std::fs::create_dir_all(tmp).unwrap();
+    let scratch = common::scratch("test_apikey_fuzzy");
+    let tmp = scratch.path();
 
     let config = SchemaConfig {
         fields: vec![
@@ -587,9 +575,8 @@ fn test_diag_miss_count() {
     // Diagnose which trigrams the fuzzy pipeline misses.
     let content = std::fs::read_to_string(
         std::env::var("DIAG_FILE").unwrap_or_else(|_| {
-            let root = std::env::var("RAG3DB_ROOT")
-                .unwrap_or_else(|_| "/tmp/test_rag3db_clone".into());
-            format!("{}/test/c_api/query_result_test.cpp", root)
+            let root = common::rag3db_clone();
+            format!("{}/test/c_api/query_result_test.cpp", root.display())
         })
     );
     let content = match content {
@@ -603,9 +590,8 @@ fn test_diag_miss_count() {
     eprintln!("=== DIAG: query='{}' file_len={} ===", query_text, content.len());
 
     // Build single-doc index
-    let tmp = std::path::Path::new("/tmp/test_diag_miss");
-    let _ = std::fs::remove_dir_all(tmp);
-    std::fs::create_dir_all(tmp).unwrap();
+    let scratch = common::scratch("test_diag_miss");
+    let tmp = scratch.path();
 
     let config = SchemaConfig {
         fields: vec![
@@ -709,9 +695,8 @@ fn test_diag_miss_count() {
 fn test_camelcase_matched_by_underscore_query() {
     // Verify: query "query_result_is_success" (with underscores) matches
     // content "queryResult.isSuccess()" (CamelCase) in exact contains (d=0).
-    let tmp = std::path::Path::new("/tmp/test_camel_underscore");
-    let _ = std::fs::remove_dir_all(tmp);
-    std::fs::create_dir_all(tmp).unwrap();
+    let scratch = common::scratch("test_camel_underscore");
+    let tmp = scratch.path();
 
     let config = SchemaConfig {
         fields: vec![

@@ -1,13 +1,14 @@
 // Quick test: 2 text fields → parallel DAG path → check posmap
+mod common;
+
 use lucivy_core::handle::LucivyHandle;
 use lucivy_core::query::{self, QueryConfig, SchemaConfig};
 use lucivy_core::directory::StdFsDirectory;
 
 #[test]
 fn test_two_text_fields_posmap() {
-    let tmp = std::path::Path::new("/tmp/test_two_fields_posmap");
-    let _ = std::fs::remove_dir_all(tmp);
-    std::fs::create_dir_all(tmp).unwrap();
+    let scratch = common::scratch("test_two_fields_posmap");
+    let tmp = scratch.path();
     
     let config = SchemaConfig {
         fields: vec![
@@ -62,9 +63,8 @@ fn test_two_text_fields_posmap() {
 
 #[test]
 fn test_multi_segment_fuzzy() {
-    let tmp = std::path::Path::new("/tmp/test_multi_seg_fuzzy");
-    let _ = std::fs::remove_dir_all(tmp);
-    std::fs::create_dir_all(tmp).unwrap();
+    let scratch = common::scratch("test_multi_seg_fuzzy");
+    let tmp = scratch.path();
     
     let config = SchemaConfig {
         fields: vec![

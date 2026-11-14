@@ -147,8 +147,8 @@ fn occurrences(handle: &LucivyHandle, ext: &str) -> (u64, u64) {
 fn positions_off_writes_documents_and_frequencies_only() {
     let files = corpus(300);
     eprintln!("corpus: {} files", files.len());
-    let base: PathBuf = std::env::temp_dir().join(format!("lucivy-positions-off-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
+    let scratch = common::scratch("lucivy-positions-off");
+    let base: PathBuf = scratch.path().to_path_buf();
     for sfx_version in [3u8, 4] {
         let with = build(&files, sfx_version, true, &base.join(format!("v{sfx_version}")));
         let without = build(&files, sfx_version, false, &base.join(format!("v{sfx_version}-nopos")));
@@ -182,7 +182,6 @@ fn positions_off_writes_documents_and_frequencies_only() {
         assert!(!reopened.index.settings().positions, "v{sfx_version}: reopened without positions");
         assert!(reopened.index.settings().skips_derived_files());
     }
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
@@ -295,14 +294,13 @@ fn compare(reference: &LucivyHandle, candidate: &LucivyHandle, panel: &[Q], what
 fn positions_off_answers_literals_like_positions() {
     let files = corpus(300);
     eprintln!("corpus: {} files", files.len());
-    let base: PathBuf = std::env::temp_dir().join(format!("lucivy-positions-off-answers-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
+    let scratch = common::scratch("lucivy-positions-off-answers");
+    let base: PathBuf = scratch.path().to_path_buf();
     for sfx_version in [3u8, 4] {
         let with = build(&files, sfx_version, true, &base.join(format!("v{sfx_version}")));
         let without = build(&files, sfx_version, false, &base.join(format!("v{sfx_version}-nopos")));
         compare(&with, &without, &literal_panel(), &format!("v{sfx_version} no positions"));
     }
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// Fuzzy (Levenshtein at one and two edits, across token boundaries,
@@ -353,8 +351,8 @@ fn ranked(handle: &LucivyHandle, q: Q) -> Vec<(u64, i64)> {
 fn positions_off_answers_fuzzy_and_regex_like_positions() {
     let files = corpus(300);
     eprintln!("corpus: {} files", files.len());
-    let base: PathBuf = std::env::temp_dir().join(format!("lucivy-positions-off-fuzzy-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
+    let scratch = common::scratch("lucivy-positions-off-fuzzy");
+    let base: PathBuf = scratch.path().to_path_buf();
     for sfx_version in [3u8, 4] {
         let with = build(&files, sfx_version, true, &base.join(format!("v{sfx_version}")));
         let without = build(&files, sfx_version, false, &base.join(format!("v{sfx_version}-nopos")));
@@ -364,5 +362,4 @@ fn positions_off_answers_fuzzy_and_regex_like_positions() {
             assert_eq!(ranked(&with, q), ranked(&without, q), "v{sfx_version} {} {}: scores differ", q.text, q.label);
         }
     }
-    let _ = std::fs::remove_dir_all(&base);
 }

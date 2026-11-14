@@ -2,23 +2,20 @@
 //! `tickets-2026-11-07`): the typographic apostrophe, and the keys a query
 //! accepts without doing anything with them.
 
+mod common;
+
 use lucivy_core::query::{QueryConfig, SchemaConfig};
 use lucivy_core::sharded_handle::ShardedHandle;
 
-fn tmp_dir(name: &str) -> String {
-    let p = std::env::temp_dir().join(name);
-    let _ = std::fs::remove_dir_all(&p);
-    std::fs::create_dir_all(&p).unwrap();
-    p.to_str().unwrap().to_string()
-}
-
-fn index(name: &str) -> ShardedHandle {
+/// The index and the scratch directory it lives in (the guard outlives the handle).
+fn index(name: &str) -> (tempfile::TempDir, ShardedHandle) {
     let config: SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [{"name": "content", "type": "text", "stored": true}],
         "shards": 2
     }))
     .unwrap();
-    let handle = ShardedHandle::create(&tmp_dir(name), &config).unwrap();
+    let scratch = common::scratch(name);
+    let handle = ShardedHandle::create(scratch.path().to_str().unwrap(), &config).unwrap();
     for (id, text) in [
         (1u64, "## Vue d'ensemble\nLe module en bref."),
         (2, "## Vue d’ensemble\nApostrophe typographique."),
@@ -27,7 +24,7 @@ fn index(name: &str) -> ShardedHandle {
         handle.add_document_json(id, &serde_json::json!({"content": text})).unwrap();
     }
     handle.commit().unwrap();
-    handle
+    (scratch, handle)
 }
 
 fn ids(handle: &ShardedHandle, q: serde_json::Value) -> Vec<u64> {
@@ -42,7 +39,7 @@ fn ids(handle: &ShardedHandle, q: serde_json::Value) -> Vec<u64> {
 /// with one was not found by the other, even at distance 1.
 #[test]
 fn both_apostrophes_find_each_other() {
-    let handle = index("lucivy_apostrophes");
+    let (_scratch, handle) = index("lucivy_apostrophes");
     for value in ["Vue d'ensemble", "Vue d’ensemble", "vue d‘ensemble", "VUE Dʼensemble"] {
         for extra in [
             serde_json::json!({}),
@@ -64,7 +61,7 @@ fn both_apostrophes_find_each_other() {
 /// `query_warnings` says so instead of letting the caller believe they applied.
 #[test]
 fn unknown_query_keys_are_named_by_the_warnings() {
-    let handle = index("lucivy_unknown_keys");
+    let (_scratch, handle) = index("lucivy_unknown_keys");
     let q: QueryConfig = serde_json::from_value(serde_json::json!({
         "type": "contains", "field": "content", "value": "ensemble",
         "boost": 2.0, "offset": 10, "slop": 1, "feild": "content", "terms": ["a"]

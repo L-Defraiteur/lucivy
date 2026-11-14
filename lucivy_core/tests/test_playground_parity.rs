@@ -7,6 +7,8 @@
 //!   PARITY_OUT=/tmp/parity_native.json \
 //!   cargo test --release -p lucivy-core --test test_playground_parity -- --ignored --nocapture
 
+mod common;
+
 use ld_lucivy::schema::Value;
 use lucivy_core::query::{QueryConfig, SchemaConfig};
 use lucivy_core::sharded_handle::ShardedHandle;
@@ -20,7 +22,8 @@ const COMMIT_EVERY: usize = 2000;
 fn playground_parity_native() {
     let root = std::env::var("PARITY_ROOT").expect("PARITY_ROOT");
     let list = std::env::var("PARITY_LIST").expect("PARITY_LIST");
-    let out = std::env::var("PARITY_OUT").unwrap_or_else(|_| "/tmp/parity_native.json".into());
+    let out = std::env::var("PARITY_OUT")
+        .unwrap_or_else(|_| common::report_path("parity_native.json").to_string_lossy().into_owned());
     let panel_path = std::env::var("PARITY_PANEL").unwrap_or_else(|_| {
         format!("{}/../playground/parity_panel.json", env!("CARGO_MANIFEST_DIR"))
     });
@@ -37,8 +40,16 @@ fn playground_parity_native() {
     }))
     .unwrap();
 
-    let dir = std::env::temp_dir().join("lucivy_parity_native");
-    let _ = std::fs::remove_dir_all(&dir);
+    // PARITY_DIR keeps the index where `test_filtered_search_truth`'s bench
+    // reads it; otherwise a scratch directory removed when the guard drops.
+    let scratch = common::scratch("lucivy_parity_native");
+    let dir = match std::env::var("PARITY_DIR") {
+        Ok(d) => {
+            let _ = std::fs::remove_dir_all(&d);
+            std::path::PathBuf::from(d)
+        }
+        Err(_) => scratch.path().to_path_buf(),
+    };
     let h = ShardedHandle::create(dir.to_str().unwrap(), &config).unwrap();
 
     let max_docs: usize = std::env::var("PARITY_MAX_DOCS").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);

@@ -3,6 +3,8 @@
 //! proves against a real Postgres (but only for v2, #[ignore]), this proves
 //! for v3 on every CI run with MemBlobStore.
 
+mod common;
+
 use std::collections::HashSet;
 use std::sync::Arc;
 use lucivy_core::handle::NODE_ID_FIELD;
@@ -65,8 +67,10 @@ fn q(value: &str, distance: Option<u8>, regex: bool) -> QueryConfig {
 #[test]
 fn v3_blob_storage_create_reopen_search() {
     let store = Arc::new(MemBlobStore::new());
+    // V3_SCRATCH wins; otherwise a scratch directory removed when the guard drops.
+    let scratch_dir = common::scratch("blob-v3");
     let scratch = std::env::var("V3_SCRATCH")
-        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+        .unwrap_or_else(|_| scratch_dir.path().to_string_lossy().to_string());
     let cache_a = format!("{scratch}/blob_v3_cache_a");
     let cache_b = format!("{scratch}/blob_v3_cache_b");
     let _ = std::fs::remove_dir_all(&cache_a);
@@ -119,8 +123,10 @@ fn v3_blob_storage_lazy_open_matches_eager() {
     use lucivy_core::blob_directory::BlobLoadMode;
 
     let store = Arc::new(MemBlobStore::new());
+    // V3_SCRATCH wins; otherwise a scratch directory removed when the guard drops.
+    let scratch_dir = common::scratch("blob-v3");
     let scratch = std::env::var("V3_SCRATCH")
-        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+        .unwrap_or_else(|_| scratch_dir.path().to_string_lossy().to_string());
     let cache_e = format!("{scratch}/blob_v3_lazy_e");
     let cache_l = format!("{scratch}/blob_v3_lazy_l");
     let _ = std::fs::remove_dir_all(&cache_e);
@@ -193,8 +199,10 @@ fn v3_blob_storage_lazy_open_matches_eager() {
 fn v3_drop_index_leaves_nothing() {
     use lucistore::blob_store::BlobStore as _;
     let store = Arc::new(MemBlobStore::new());
+    // V3_SCRATCH wins; otherwise a scratch directory removed when the guard drops.
+    let scratch_dir = common::scratch("blob-v3");
     let scratch = std::env::var("V3_SCRATCH")
-        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+        .unwrap_or_else(|_| scratch_dir.path().to_string_lossy().to_string());
     let cache = format!("{scratch}/blob_v3_drop");
     let _ = std::fs::remove_dir_all(&cache);
     let docs = docs();
@@ -275,8 +283,10 @@ fn v3_close_means_no_more_store_calls() {
         armed: AtomicBool::new(false),
         late: Mutex::new(Vec::new()),
     });
+    // V3_SCRATCH wins; otherwise a scratch directory removed when the guard drops.
+    let scratch_dir = common::scratch("blob-v3");
     let scratch = std::env::var("V3_SCRATCH")
-        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+        .unwrap_or_else(|_| scratch_dir.path().to_string_lossy().to_string());
     let cache = format!("{scratch}/blob_v3_armed");
     let _ = std::fs::remove_dir_all(&cache);
 
@@ -321,10 +331,9 @@ fn lazy_open_with_a_store_that_cannot_size_blobs_does_not_deadlock() {
     }
 
     let store = Arc::new(NoLen(MemBlobStore::new()));
-    let cache_a = std::env::temp_dir().join("lucivy_nolen_a");
-    let cache_b = std::env::temp_dir().join("lucivy_nolen_b");
-    let _ = std::fs::remove_dir_all(&cache_a);
-    let _ = std::fs::remove_dir_all(&cache_b);
+    let scratch = common::scratch("nolen");
+    let cache_a = scratch.path().join("lucivy_nolen_a");
+    let cache_b = scratch.path().join("lucivy_nolen_b");
     {
         let storage = BlobShardStorage::new(store.clone(), "nolen", &cache_a);
         let h = ShardedHandle::create_with_storage(Box::new(storage), &config(2)).unwrap();
