@@ -18,11 +18,15 @@ pub struct MaintenanceRequest {
     pub compact: bool,
     /// Largest merged segment, in documents (`compact`).
     pub compact_max_docs: usize,
+    /// Refuse, before deleting anything, a purge of more than this share of
+    /// the live documents (0.5 by default): a failed read of the caller's
+    /// graph makes the whole table look orphan. 1.0 lets everything through.
+    pub max_purge_ratio: f64,
 }
 
 impl Default for MaintenanceRequest {
     fn default() -> Self {
-        Self { purge_node_ids: Vec::new(), compact: false, compact_max_docs: 10_000_000 }
+        Self { purge_node_ids: Vec::new(), compact: false, compact_max_docs: 10_000_000, max_purge_ratio: 0.5 }
     }
 }
 
@@ -90,9 +94,18 @@ impl ShardedHandle {
     /// and after, so a writer adding documents meanwhile would skew `purged`.
     /// A request with no id and no compaction writes nothing.
     pub fn maintain(&self, request: &MaintenanceRequest) -> Result<MaintenanceReport, String> {
-        let before = self.index_report()?;
         let ids: std::collections::BTreeSet<u64> = request.purge_node_ids.iter().copied().collect();
         let requested = ids.len() as u64;
+        let live = self.num_docs();
+        if requested > 0 && requested as f64 > request.max_purge_ratio * live as f64 {
+            return Err(format!(
+                "maintain: refusing to purge {requested} ids out of {live} live documents \
+                 (more than {:.0} %, max_purge_ratio): a failed read of the caller's graph makes every document look orphan; \
+                 nothing was deleted",
+                request.max_purge_ratio * 100.0,
+            ));
+        }
+        let before = self.index_report()?;
 
         let started = std::time::Instant::now();
         let live_before = self.num_docs();
