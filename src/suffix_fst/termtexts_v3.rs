@@ -315,7 +315,7 @@ pub fn write_merged_keeping(
     out: &mut dyn std::io::Write,
 ) -> std::io::Result<u32> {
     use std::io::{Error, ErrorKind};
-    let entries = || MergedEntries::new(parts).filter(move |(id, _, _)| keep.map_or(true, |k| k(*id)));
+    let entries = || MergedEntries::new(parts).filter(move |(id, _, _)| keep.is_none_or(|k| k(*id)));
     let mut offsets: Vec<u32> = Vec::new();
     let mut runs: Vec<(u32, u32)> = Vec::new();
     let mut total: u64 = 0;
