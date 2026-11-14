@@ -89,12 +89,26 @@ jobs:
       # No kernel corpus and no rag3db clone here: the corpus tests take their
       # synthetic corpus or skip, and say so. Without this variable a missing
       # corpus fails the test; the ground-truth job below carries its corpus.
+      # Each run gets a temp dir of its own, which must be empty afterwards: a
+      # test (or the engine) that leaves files behind is a red step, not 1.7 GiB
+      # found later in a RAM-backed /tmp (14 November 2026). The sources are also
+      # checked for fixed /tmp paths (test_no_residue_under_tmp).
       - name: lucivy-core
         env:
           LUCIVY_CORPUS_ABSENT_OK: "1"
-        run: cargo test -p lucivy-core --no-fail-fast
+        run: |
+          export TMPDIR="$RUNNER_TEMP/lucivy-core-tmp" && mkdir -p "$TMPDIR"
+          cargo test -p lucivy-core --no-fail-fast
+          if [ -n "$(ls -A "$TMPDIR")" ]; then
+            echo "lucivy-core tests left files in their temp dir:"; ls -la "$TMPDIR"; exit 1
+          fi
       - name: lucivy-cpp
-        run: cargo test -p lucivy-cpp
+        run: |
+          export TMPDIR="$RUNNER_TEMP/lucivy-cpp-tmp" && mkdir -p "$TMPDIR"
+          cargo test -p lucivy-cpp
+          if [ -n "$(ls -A "$TMPDIR")" ]; then
+            echo "lucivy-cpp tests left files in their temp dir:"; ls -la "$TMPDIR"; exit 1
+          fi
 
   # Ground truth on the repository's own source: every count and every span
   # of a fixed panel (strict, relaxed, fuzzy, regex) compared with a byte-level
