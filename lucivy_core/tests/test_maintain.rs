@@ -139,3 +139,23 @@ fn maintain_an_index() {
     assert_eq!(reopened.num_docs(), written - deleted, "[check: the-maintenance-survives-reopening]");
     reopened.close().unwrap();
 }
+
+#[test]
+fn maintain_refuses_a_purge_of_more_than_half_the_table() {
+    // A failed read of the caller's graph makes the whole table look orphan:
+    // past `max_purge_ratio` (half by default) of the live documents, nothing is done.
+    let scratch = common::scratch("maintain-guard");
+    let index = fixture(scratch.path().to_str().unwrap());
+    let too_many: Vec<u64> = (0..201).collect();
+    let error = index.maintain(&MaintenanceRequest { purge_node_ids: too_many.clone(), compact: true, ..Default::default() })
+        .expect_err("[check: more-than-half-is-refused]");
+    eprintln!("{error}");
+    assert!(error.contains("201") && error.contains("400"), "[check: the-refusal-says-the-counts] {error}");
+    assert_eq!(index.num_docs(), 400, "[check: nothing-deleted]");
+    // Exactly half passes; a caller who means it raises the ratio.
+    let half = index.maintain(&MaintenanceRequest { purge_node_ids: (0..200).collect(), ..Default::default() }).unwrap();
+    assert_eq!(half.purged, 200, "[check: half-passes]");
+    let all = index.maintain(&MaintenanceRequest { purge_node_ids: (200..400).collect(), max_purge_ratio: 1.0, ..Default::default() }).unwrap();
+    assert_eq!(all.purged, 200, "[check: a-raised-ratio-passes]");
+    index.close().unwrap();
+}
