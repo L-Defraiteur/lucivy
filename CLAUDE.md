@@ -533,6 +533,14 @@ Publier reste une décision explicite de Lucie.
 Chemin suivi : branche de travail → PR vers `main` → fusion en avance rapide → tag sur `main`. Deux aléas en route :
 un `startup_failure` de GitHub (relancé, sans rapport avec nos fichiers) et un test qui comparait un top-10 d'ex æquo
 (`test_snapshot_served`, corrigé comme le roundtrip LUCE l'avait été).
+**4.3.7 publiée le 14 novembre 2026 vers 14 h** (tag `v4.3.7`, `main` = `9a09170`, PR #31, rebase ; tag sur le mot de Lucie
+après CI et bâti verts du SHA exact ; publication du premier coup) : une recherche filtrée par `allowed_ids` classe comme son
+sous-ensemble — `set_alive_bitset` ne mettait pas `num_docs` à jour, la vue (`with_subset_docs`) valait l'index entier et l'IDF
+mêlait le N du corpus aux fréquences de la vue (2,26 contre 0,047 sur 100 documents filtrés à 10, pour term, contains, phrase
+et parse). Témoin `test_filtered_scores_match_the_subset` (1 et 2 shards). Correction du 13 au soir : `lucivy-wasm` publiait
+déjà par trusted publishing (jeton vide à l'étape de publication, provenance signée) ; l'avertissement npm sur les jetons est
+général. Mesure du plein texte du dépôt (14 nov.) : 928 Mo de texte indexé, dont 92 % de minifiés et 844 Mo de doublons
+(un scope reçoit les lignes qu'il couvre) — rag3db `docs/lucivy/14-11-2026/01-ce-que-pese-lucivy-scope-document-par-document.md`.
 **4.3.6 publiée le 13 novembre 2026 vers 22 h 50** (tag `v4.3.6`, `main` = `ea5251d`, PR #29 puis #30, rebase ; tag sur le mot
 de Lucie après CI et bâti verts du SHA exact ; publication du premier coup) : `check_dictionary` (Rust `LucivyHandle` et
 `ShardedHandle`, Node `checkDictionary()`, Python `check_dictionary()`), qui compte les ids de mots que les segments
@@ -633,10 +641,10 @@ et à l'environnement `release`).
 
 | Registre | Package | Publié | Date |
 |----------|---------|---------|---------|
-| PyPI | `lucivy` | **4.3.6** (13 novembre 2026, nuit), **4.3.5** (13 novembre 2026, soir), **4.3.4** (13 novembre 2026), **4.3.3** (11 novembre 2026), **4.3.2** (7 novembre 2026), **4.3.1** (25 octobre 2026), **4.3.0** (14 septembre 2026), **4.2.0** (13 septembre 2026 au soir), **4.1.0** (13 septembre 2026), **4.0.0**, **4.0.1**, **4.0.2** (5 wheels `cp39-abi3` : manylinux_2_28 x86_64 + aarch64, macOS x86_64 + arm64, win_amd64 ; + sdist) — par le tag | 6 septembre 2026 (nuit, puis 14 h 30) |
-| npm | `lucivy` + `lucivy-linux-x64-gnu`, `lucivy-linux-arm64-gnu`, `lucivy-darwin-x64`, `lucivy-darwin-arm64`, `lucivy-windows-x64` | **4.3.6**, **4.3.5**, **4.3.4**, **4.3.3**, **4.3.2**, **4.3.1**, **4.3.0**, **4.2.0**, **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** — par le tag | 6 septembre 2026 (nuit, puis 14 h 30) |
-| npm | `lucivy-wasm` | **4.3.6**, **4.3.5**, **4.3.4**, **4.3.3**, **4.3.2**, **4.3.1**, **4.3.0**, **4.2.0**, **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** (job `wasm` + `publish-wasm`) | 6 septembre 2026 (nuit, puis 14 h 30) |
-| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` (+ `lucivy-fst` 0.1.x) | **4.3.6** (13 novembre dans la nuit, par le tag, du premier coup), **4.3.5** (13 novembre au soir, par le tag, après relance d'un job macOS), **4.3.4** (13 novembre, par le tag, après relance des jobs macOS), **4.3.3** (11 novembre, par le tag, d'un coup), **4.3.2** (7 novembre, par le tag, d'un coup), **4.3.1** (25 octobre, par le tag, d'un coup), **4.3.0** (14 septembre, par le tag, d'un coup), **4.2.0** (le 13 septembre au soir : `luciole` et `lucistore` par le tag, `lucivy-fst` 0.1.1, `ld-lucivy`, `lucivy-core` et `sparse-vector` par le dispatch de rattrapage), **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** — par le tag, en dernier | 6 septembre 2026 (nuit, puis 14 h 30) |
+| PyPI | `lucivy` | **4.3.7** (14 novembre 2026), **4.3.6** (13 novembre 2026, nuit), **4.3.5** (13 novembre 2026, soir), **4.3.4** (13 novembre 2026), **4.3.3** (11 novembre 2026), **4.3.2** (7 novembre 2026), **4.3.1** (25 octobre 2026), **4.3.0** (14 septembre 2026), **4.2.0** (13 septembre 2026 au soir), **4.1.0** (13 septembre 2026), **4.0.0**, **4.0.1**, **4.0.2** (5 wheels `cp39-abi3` : manylinux_2_28 x86_64 + aarch64, macOS x86_64 + arm64, win_amd64 ; + sdist) — par le tag | 6 septembre 2026 (nuit, puis 14 h 30) |
+| npm | `lucivy` + `lucivy-linux-x64-gnu`, `lucivy-linux-arm64-gnu`, `lucivy-darwin-x64`, `lucivy-darwin-arm64`, `lucivy-windows-x64` | **4.3.7**, **4.3.6**, **4.3.5**, **4.3.4**, **4.3.3**, **4.3.2**, **4.3.1**, **4.3.0**, **4.2.0**, **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** — par le tag | 6 septembre 2026 (nuit, puis 14 h 30) |
+| npm | `lucivy-wasm` | **4.3.7**, **4.3.6**, **4.3.5**, **4.3.4**, **4.3.3**, **4.3.2**, **4.3.1**, **4.3.0**, **4.2.0**, **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** (job `wasm` + `publish-wasm`) | 6 septembre 2026 (nuit, puis 14 h 30) |
+| crates.io | `ld-lucivy`, `lucivy-core`, `luciole`, `lucistore`, `sparse-vector` (+ `lucivy-fst` 0.1.x) | **4.3.7** (14 novembre, par le tag, du premier coup), **4.3.6** (13 novembre dans la nuit, par le tag, du premier coup), **4.3.5** (13 novembre au soir, par le tag, après relance d'un job macOS), **4.3.4** (13 novembre, par le tag, après relance des jobs macOS), **4.3.3** (11 novembre, par le tag, d'un coup), **4.3.2** (7 novembre, par le tag, d'un coup), **4.3.1** (25 octobre, par le tag, d'un coup), **4.3.0** (14 septembre, par le tag, d'un coup), **4.2.0** (le 13 septembre au soir : `luciole` et `lucistore` par le tag, `lucivy-fst` 0.1.1, `ld-lucivy`, `lucivy-core` et `sparse-vector` par le dispatch de rattrapage), **4.1.0**, **4.0.0**, **4.0.1**, **4.0.2** — par le tag, en dernier | 6 septembre 2026 (nuit, puis 14 h 30) |
 | (avant) | tout | 3.0.7 le 28 août (nuit), 3.0.8 le 28 août à 15 h | |
 
 3.0.7 dans la nuit du 27 au 28, juste après 3.0.6 : **le fuzzy relâché
