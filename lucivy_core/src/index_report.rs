@@ -190,7 +190,7 @@ impl LucivyHandle {
 
     pub(crate) fn gather_report(&self, shard: usize, out: &mut Gathered) -> Result<(), String> {
         let directory = self.index.directory();
-        let size_of = |path: &std::path::Path| directory.open_read(path).map(|f| f.len() as u64).unwrap_or(0);
+        let size_of = |path: &std::path::Path| directory.open_read(path).map(|f| ld_lucivy::HasLen::len(&f) as u64).unwrap_or(0);
         let mut add = |path: &std::path::Path, out: &mut Gathered| -> u64 {
             let bytes = size_of(path);
             let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
