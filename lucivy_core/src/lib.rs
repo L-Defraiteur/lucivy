@@ -11,6 +11,7 @@ pub mod diagnostics;
 pub mod dictionary_check;
 pub mod directory;
 pub mod handle;
+pub mod index_report;
 pub mod query;
 /// Document routing across shards lives in lucistore (shared with the
 /// sparse index); kept here as a path for existing users.

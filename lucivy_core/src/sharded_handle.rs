@@ -3275,6 +3275,17 @@ impl ShardedHandle {
         Ok(total)
     }
 
+    /// What this index is made of, every shard together (see
+    /// [`crate::index_report`]): segments by shard, text fields over all the
+    /// live documents, files by family. Read-only; reads every stored document.
+    pub fn index_report(&self) -> Result<crate::index_report::IndexReport, String> {
+        let mut gathered = crate::index_report::Gathered::default();
+        for (i, shard) in self.shards.iter().enumerate() {
+            shard.gather_report(i, &mut gathered)?;
+        }
+        Ok(gathered.into_report())
+    }
+
     /// Access a shard's LucivyHandle (for advanced use, e.g. reading stored fields).
     pub fn shard(&self, shard_id: usize) -> Option<&LucivyHandle> {
         self.shards.get(shard_id).map(|arc| arc.as_ref())
