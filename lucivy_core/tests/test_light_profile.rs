@@ -38,12 +38,15 @@ fn variant_config(source: &SchemaConfig, variant: &str) -> SchemaConfig {
             config.derived_in_ram = None;
         }
         "segment_dictionary" => {
+            // A dictionary per segment is the v3 layout: v4 refuses `shared_dictionary: false`.
             config.positions = Some(true);
             config.shared_dictionary = Some(false);
+            config.sfx_version = Some(3);
         }
         "no_positions_segment_dictionary" => {
             config.positions = Some(false);
             config.shared_dictionary = Some(false);
+            config.sfx_version = Some(3);
             config.derived_in_ram = None;
         }
         other => panic!("unknown variant {other}"),
@@ -95,7 +98,7 @@ fn stored_documents(source: &ShardedHandle) -> Vec<(u64, serde_json::Value)> {
     out
 }
 
-fn answers(index: &ShardedHandle, query: &QueryConfig) -> (Vec<u64>, f64, f64, usize) {
+fn answers(index: &ShardedHandle, query: &QueryConfig) -> (Vec<(u64, f32)>, f64, f64, usize) {
     let mut times = Vec::new();
     let mut ids = Vec::new();
     let mut spans = 0;
@@ -103,7 +106,8 @@ fn answers(index: &ShardedHandle, query: &QueryConfig) -> (Vec<u64>, f64, f64, u
         let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
         let started = Instant::now();
         let results = index.search(query, 20, Some(sink.clone())).unwrap();
-        let found = index.node_ids_of(&results).unwrap();
+        let found: Vec<(u64, f32)> = index.node_ids_of(&results).unwrap().into_iter()
+            .zip(results.iter().map(|r| r.score)).collect();
         times.push(started.elapsed().as_secs_f64() * 1000.0);
         if run == 0 {
             ids = found;
@@ -137,7 +141,7 @@ fn light_profile_of_an_index() {
     println!("source :\n{}", source.index_report().unwrap().summary());
     drop(source);
 
-    let mut reference: Option<Vec<(String, BTreeSet<u64>)>> = None;
+    let mut reference: Option<Vec<(String, Vec<(u64, f32)>)>> = None;
     for variant in variants.split(',') {
         let path = out.join(variant);
         assert!(!path.exists(), "{} exists: the measure writes into an empty directory", path.display());
@@ -164,16 +168,24 @@ fn light_profile_of_an_index() {
             let query: QueryConfig = serde_json::from_value(entry["query"].clone()).unwrap();
             let (ids, first, median, spans) = answers(&index, &query);
             println!("{label}\t{first:.1}\t{median:.1}\t{}\t{spans}", ids.len());
-            seen.push((label, ids.into_iter().collect::<BTreeSet<u64>>()));
+            seen.push((label, ids));
         }
         match &reference {
             None => reference = Some(seen),
             Some(expected) => {
                 for ((label, got), (_, want)) in seen.iter().zip(expected) {
-                    if got != want {
-                        println!("DIFFERENT ANSWERS for {label} in {variant}: {} vs {} documents, {} in common",
-                            got.len(), want.len(), got.intersection(want).count());
+                    let g: BTreeSet<u64> = got.iter().map(|x| x.0).collect();
+                    let w: BTreeSet<u64> = want.iter().map(|x| x.0).collect();
+                    if g != w {
+                        // Ties at the cut of the top-k are not a different answer: say the scores.
+                        let last = |v: &Vec<(u64, f32)>| v.last().map(|x| x.1).unwrap_or(0.0);
+                        let only = |a: &Vec<(u64, f32)>, b: &BTreeSet<u64>| a.iter()
+                            .filter(|x| !b.contains(&x.0)).map(|x| format!("{}:{}", x.0, x.1)).collect::<Vec<_>>().join(" ");
+                        println!("DIFFERENT ANSWERS for {label} in {variant}: {} in common of {} ; last score {} vs {} ; only here [{}] ; only in the first [{}]",
+                            g.intersection(&w).count(), w.len(), last(got), last(want), only(got, &w), only(want, &g));
                     }
+                    let scores_differ = got.iter().zip(want).any(|(a, b)| a.0 == b.0 && a.1.to_bits() != b.1.to_bits());
+                    if scores_differ { println!("SCORES DIFFER for {label} in {variant}"); }
                 }
             }
         }
