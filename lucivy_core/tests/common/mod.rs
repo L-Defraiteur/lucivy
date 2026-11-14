@@ -98,14 +98,24 @@ pub fn rag3db_clone() -> std::path::PathBuf {
         .unwrap_or_else(std::env::temp_dir);
     let path = base.join("lucivy-tests").join("rag3db-clone");
     if !path.exists() {
-        std::fs::create_dir_all(path.parent().unwrap()).expect("create the clone's parent");
+        let parent = path.parent().unwrap();
+        std::fs::create_dir_all(parent).expect("create the clone's parent");
+        // Several tests of one binary call this at once: each clones into a
+        // directory of its own, then renames it into place. The loser of the
+        // race throws its copy away and takes the winner's.
+        let staging = tempfile::Builder::new().prefix("rag3db-clone-").tempdir_in(parent)
+            .expect("create the clone's staging directory");
+        let target = staging.path().join("repo");
         eprintln!("Cloning https://github.com/L-Defraiteur/rag3db.git into {} ...", path.display());
         let status = std::process::Command::new("git")
-            .args(["clone", "--depth", "1", "https://github.com/L-Defraiteur/rag3db.git"])
-            .arg(&path)
+            .args(["clone", "--quiet", "--depth", "1", "https://github.com/L-Defraiteur/rag3db.git"])
+            .arg(&target)
             .status()
             .expect("git clone failed");
         assert!(status.success(), "git clone failed");
+        if std::fs::rename(&target, &path).is_err() {
+            assert!(path.exists(), "the clone could not be moved into {}", path.display());
+        }
     }
     path
 }
