@@ -527,6 +527,18 @@ impl BlobCache {
     }
 }
 
+impl Drop for BlobCache {
+    /// A cache directory the binding made is removed when it is let go — with
+    /// the index, and also when creating or opening the index failed after the
+    /// directory was made (it used to stay in the temp dir, one per failure).
+    /// Best effort: the cache is disposable by definition.
+    fn drop(&mut self) {
+        if self.owned {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
 fn blob_storage(
     backend: UniquePtr<ffi::BlobBackend>,
     index_name: &str,
@@ -603,16 +615,13 @@ pub struct LucivyIndex {
 impl Drop for LucivyIndex {
     fn drop(&mut self) {
         let Some(cache) = self.blob_cache.take() else { return };
-        if !cache.owned {
-            return;
-        }
         // The handle goes first: each shard's BlobDirectory removes its own
         // cache subdirectory when its last clone drops. Then the base we
-        // made for it. Best effort: the cache is disposable by definition.
+        // made for it, when `cache` drops (`Drop for BlobCache`).
         if let Ok(slot) = self.handle.get_mut() {
             slot.take();
         }
-        let _ = std::fs::remove_dir_all(&cache.path);
+        drop(cache);
     }
 }
 
