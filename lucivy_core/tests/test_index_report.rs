@@ -71,3 +71,22 @@ fn the_report_gives_the_known_numbers_of_a_fixture() {
     assert!((report.ratio() - report.index_bytes as f64 / report.stored_text_bytes as f64).abs() < 1e-9);
     index.close().unwrap();
 }
+
+/// The report of a real sharded index (`LUCIVY_REPORT_INDEX` = a COPY of its
+/// directory: opening may write). The command recherche and hotfixs replay:
+///     LUCIVY_REPORT_INDEX=<copy> cargo test --release -p lucivy-core \
+///         --test test_index_report report_of_an_index -- --ignored --nocapture
+#[test]
+#[ignore]
+fn report_of_an_index() {
+    let path = std::env::var("LUCIVY_REPORT_INDEX").expect("LUCIVY_REPORT_INDEX");
+    let index = ShardedHandle::open(&path).unwrap();
+    let report = index.index_report().unwrap();
+    eprint!("{}", report.summary());
+    for f in &report.fields {
+        eprintln!("  largest of {} (_node_id, bytes): {:?}", f.field, f.largest);
+    }
+    for s in &report.segments {
+        eprintln!("  shard {} segment {}: {} written, {} deleted, {} B", s.shard, s.segment, s.max_doc, s.deleted, s.bytes);
+    }
+}
