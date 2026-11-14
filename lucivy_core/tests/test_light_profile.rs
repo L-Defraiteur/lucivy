@@ -184,8 +184,21 @@ fn light_profile_of_an_index() {
                         println!("DIFFERENT ANSWERS for {label} in {variant}: {} in common of {} ; last score {} vs {} ; only here [{}] ; only in the first [{}]",
                             g.intersection(&w).count(), w.len(), last(got), last(want), only(got, &w), only(want, &g));
                     }
-                    let scores_differ = got.iter().zip(want).any(|(a, b)| a.0 == b.0 && a.1.to_bits() != b.1.to_bits());
-                    if scores_differ { println!("SCORES DIFFER for {label} in {variant}"); }
+                    // Same document, same score to the bit? Say the largest gap, absolute and relative.
+                    let mut worst = (0.0f64, 0.0f64, 0usize);
+                    for (id, score) in got {
+                        if let Some((_, other)) = want.iter().find(|x| x.0 == *id) {
+                            if score.to_bits() != other.to_bits() {
+                                let gap = (*score as f64 - *other as f64).abs();
+                                worst.2 += 1;
+                                if gap > worst.0 { worst.0 = gap; worst.1 = gap / (*other as f64).abs().max(1e-30); }
+                            }
+                        }
+                    }
+                    if worst.2 > 0 {
+                        println!("SCORES DIFFER for {label} in {variant}: {} documents, largest gap {:.3e} ({:.3e} relative)",
+                            worst.2, worst.0, worst.1);
+                    }
                 }
             }
         }
