@@ -563,8 +563,15 @@ pub(crate) fn create_segment_updater_actor(
             }
             if !current.is_empty() { groups.push(current); }
             let opstamp = su.shared.load_meta().opstamp;
+            // A group of one segment is rewritten when it carries deleted
+            // documents: the merge is what purges them, and what drops the
+            // ids they alone held (`sfx_dag_v3::live_ids_of`). Until 14
+            // November 2026 a shard compacted down to one segment kept its
+            // deletions for ever.
+            let with_deletes: std::collections::HashSet<crate::index::SegmentId> = metas.iter()
+                .filter(|m| m.has_deletes()).map(|m| m.id()).collect();
             let ops: Vec<MergeOperation> = groups.into_iter()
-                .filter(|g| g.len() >= 2)
+                .filter(|g| g.len() >= 2 || g.iter().any(|id| with_deletes.contains(id)))
                 .map(|g| MergeOperation::new(opstamp, g))
                 .collect();
             if ops.is_empty() {
