@@ -92,3 +92,44 @@ fn purge_orphelins() {
     assert_eq!(rouvert, apres_docs, "[check: la-purge-survit-a-la-reouverture]");
     assert!(!touches.is_empty(), "[check: le-banc-touche-des-orphelins] aucun orphelin dans le banc : le témoin ne prouverait rien");
 }
+
+/// Le gain d'octets d'une purge : `compact` sur une COPIE de table (purgée, ou neuve comme témoin), le
+/// rapport d'index avant et après, et le banc `PURGE_MOTS` qui doit rendre les mêmes `_node_id` avant et
+/// après la fusion.
+///
+///     PURGE_TABLE=<copie>/Lucivy_Scope PURGE_CHAMP=content PURGE_MOTS=fn,self \
+///     cargo test --release -p lucivy-core --test diag_purge_orphelins compacter -- --ignored --nocapture
+#[test]
+#[ignore]
+fn compacter() {
+    let table = std::env::var("PURGE_TABLE").expect("PURGE_TABLE");
+    let champ = std::env::var("PURGE_CHAMP").unwrap_or_else(|_| "content".into());
+    let mots: Vec<String> = std::env::var("PURGE_MOTS").expect("PURGE_MOTS").split(',').map(str::to_string).collect();
+    let max_docs: usize = std::env::var("COMPACT_MAX_DOCS").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000_000);
+    let index = ShardedHandle::open(&table).unwrap();
+    let docs = index.num_docs();
+    let avant = index.index_report().unwrap();
+    eprintln!("RAPPORT AVANT\n{}", avant.summary());
+    let banc_avant = banc(&index, &champ, &mots);
+    let t = std::time::Instant::now();
+    let fusions = index.compact(max_docs).unwrap();
+    index.wait_merges_quiet().unwrap();
+    eprintln!("COMPACT : {fusions} tours de fusion, {} ms", t.elapsed().as_millis());
+    let apres = index.index_report().unwrap();
+    eprintln!("RAPPORT APRÈS\n{}", apres.summary());
+    let banc_apres = banc(&index, &champ, &mots);
+    let ecarts: Vec<&String> = mots.iter().filter(|m| banc_avant[*m] != banc_apres[*m]).collect();
+    let seg = |r: &lucivy_core::index_report::IndexReport| (r.segments.len(), r.segments.iter().map(|s| s.deleted as u64).sum::<u64>());
+    eprintln!(
+        "BILAN COMPACT {table} : documents {docs} → {}, segments {:?} → {:?} (nombre, supprimés), octets d'index {} → {}, rapport index/texte {:.2} → {:.2}",
+        index.num_docs(),
+        seg(&avant),
+        seg(&apres),
+        avant.index_bytes,
+        apres.index_bytes,
+        avant.ratio(),
+        apres.ratio(),
+    );
+    index.close().unwrap();
+    assert!(ecarts.is_empty(), "[check: memes-hits-apres-fusion] {ecarts:?}");
+}
