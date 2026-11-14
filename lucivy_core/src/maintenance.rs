@@ -43,6 +43,9 @@ pub struct MaintenanceReport {
     pub absent: u64,
     /// Merge rounds the compaction ran.
     pub merge_rounds: usize,
+    /// Texts of the shard dictionaries before and after their compaction
+    /// (`compact`: the texts no live document holds leave them).
+    pub dictionary_texts: (u64, u64),
     pub purge_ms: u64,
     pub compact_ms: u64,
 }
@@ -52,9 +55,10 @@ impl MaintenanceReport {
         let (written_b, deleted_b) = self.before.documents();
         let (written_a, deleted_a) = self.after.documents();
         format!(
-            "purge: {} asked, {} removed, {} absent ({} ms); compaction: {} rounds ({} ms)\n\
+            "purge: {} asked, {} removed, {} absent ({} ms); compaction: {} rounds, dictionary texts {} → {} ({} ms)\n\
              documents {} → {} live, deleted in segments {} → {}, segments {} → {}, index {} → {} bytes (×{:.2} → ×{:.2} its text)",
-            self.requested, self.purged, self.absent, self.purge_ms, self.merge_rounds, self.compact_ms,
+            self.requested, self.purged, self.absent, self.purge_ms, self.merge_rounds,
+            self.dictionary_texts.0, self.dictionary_texts.1, self.compact_ms,
             written_b - deleted_b, written_a - deleted_a, deleted_b, deleted_a,
             self.before.segments.len(), self.after.segments.len(),
             self.before.index_bytes, self.after.index_bytes, self.before.ratio(), self.after.ratio(),
@@ -63,6 +67,30 @@ impl MaintenanceReport {
 }
 
 impl ShardedHandle {
+    /// Rewrite every shard's dictionary over the ids its committed segments
+    /// still cite (`IndexWriter::compact_dictionary`), each under its
+    /// writer's lock so that nothing is indexed meanwhile; refused when a
+    /// shard holds uncommitted documents. Returns the texts before and
+    /// after, summed over the shards.
+    pub fn compact_dictionaries(&self) -> Result<(u64, u64), String> {
+        let mut texts = (0u64, 0u64);
+        for shard in 0..self.num_shards() {
+            let handle = self.shard(shard).ok_or_else(|| format!("shard_{shard} missing"))?;
+            let mut guard = handle.writer.lock().map_err(|_| "writer lock poisoned")?;
+            if handle.has_uncommitted() {
+                return Err(format!("shard_{shard}: uncommitted documents — commit before compacting the dictionary"));
+            }
+            if let Some(writer) = guard.as_mut() {
+                let report = writer.compact_dictionary().map_err(|e| format!("shard_{shard}: {e}"))?;
+                texts.0 += report.texts_before;
+                texts.1 += report.texts_after;
+            }
+            drop(guard);
+            handle.reader.reload().map_err(|e| format!("shard_{shard} reload: {e}"))?;
+        }
+        Ok(texts)
+    }
+
     /// The `_node_id` of every live document, ascending: what the caller
     /// compares with its graph to find the orphans it then gives `maintain`.
     pub fn live_node_ids(&self) -> Result<Vec<u64>, String> {
@@ -120,12 +148,12 @@ impl ShardedHandle {
         let purge_ms = started.elapsed().as_millis() as u64;
 
         let started = std::time::Instant::now();
-        let merge_rounds = if request.compact {
+        let (merge_rounds, dictionary_texts) = if request.compact {
             let rounds = self.compact(request.compact_max_docs)?;
             self.wait_merges_quiet()?;
-            rounds
+            (rounds, self.compact_dictionaries()?)
         } else {
-            0
+            (0, (0, 0))
         };
         let compact_ms = started.elapsed().as_millis() as u64;
 
@@ -137,6 +165,7 @@ impl ShardedHandle {
             purged,
             absent: requested.saturating_sub(purged),
             merge_rounds,
+            dictionary_texts,
             purge_ms,
             compact_ms,
         })

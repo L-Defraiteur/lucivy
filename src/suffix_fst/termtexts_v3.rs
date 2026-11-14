@@ -303,12 +303,24 @@ impl<'r, 'a: 'r> Iterator for MergedEntries<'r, 'a> {
 /// texts), and the offset table is the only thing in RAM. Returns the
 /// number of entries.
 pub fn write_merged(parts: &[TermTextsReaderV3<'_>], out: &mut dyn std::io::Write) -> std::io::Result<u32> {
+    write_merged_keeping(parts, None, out)
+}
+
+/// `write_merged` over the ids `keep` accepts only (all of them on `None`):
+/// what the compaction of a dictionary's dead texts writes
+/// (`dictionary_compact::compact_parts_keeping`).
+pub fn write_merged_keeping(
+    parts: &[TermTextsReaderV3<'_>],
+    keep: Option<&(dyn Fn(u32) -> bool + Sync)>,
+    out: &mut dyn std::io::Write,
+) -> std::io::Result<u32> {
     use std::io::{Error, ErrorKind};
+    let entries = || MergedEntries::new(parts).filter(move |(id, _, _)| keep.map_or(true, |k| k(*id)));
     let mut offsets: Vec<u32> = Vec::new();
     let mut runs: Vec<(u32, u32)> = Vec::new();
     let mut total: u64 = 0;
     let mut max_word: u16 = 0;
-    for (id, text, m) in MergedEntries::new(parts) {
+    for (id, text, m) in entries() {
         offsets.push(total as u32);
         total += text.len() as u64;
         if total > u32::MAX as u64 {
@@ -339,10 +351,10 @@ pub fn write_merged(parts: &[TermTextsReaderV3<'_>], out: &mut dyn std::io::Writ
     out.write_all(&header)?;
     out.write_all(&num.to_le_bytes())?;
     out.write_all(&table)?;
-    for (_, _, m) in MergedEntries::new(parts) {
+    for (_, _, m) in entries() {
         out.write_all(&pack_meta(&m))?;
     }
-    for (_, text, _) in MergedEntries::new(parts) {
+    for (_, text, _) in entries() {
         out.write_all(text.as_bytes())?;
     }
     out.write_all(&stats_section(max_word))?;

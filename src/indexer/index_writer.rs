@@ -491,6 +491,17 @@ impl<D: Document> IndexWriter<D> {
     /// documents. The segment updater plans it with full knowledge of the
     /// merges in flight, so it never races the policy. Returns when the
     /// merges of that plan are registered; a policy cascade may follow.
+    /// Rewrite the shard dictionary (`sfx_version` 4) over the ids the
+    /// committed segments still cite: the texts no live document holds any
+    /// more leave it. Call after a commit and a compaction, with nothing
+    /// being indexed; refused while a merge, a fold or an uncommitted
+    /// segment is in flight. Nothing to do on another `sfx_version`.
+    pub fn compact_dictionary(&mut self) -> crate::Result<super::DeadTextsReport> {
+        self.segment_updater.wait_merging_thread()?;
+        self.index.dictionary_fold().wait_settled();
+        self.segment_updater.compact_dictionary()
+    }
+
     pub fn compact(&mut self, max_docs: usize) -> crate::Result<()> {
         // Segments held by a merge in flight are not candidates; with one
         // merge at a time (wasm) a policy cascade keeps most of them held,

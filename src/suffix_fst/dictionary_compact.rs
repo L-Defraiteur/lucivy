@@ -191,6 +191,23 @@ pub fn compact_parts(
     field_id: u32,
     out: u64,
 ) -> crate::Result<CompactReport> {
+    compact_parts_keeping(directory, sfx_parts, termtexts_parts, field_id, out, None)
+}
+
+/// `compact_parts` keeping only the ids `keep` accepts (every id on
+/// `None`): a parent whose id it refuses is dropped from its key's record,
+/// a key left without a parent is dropped from the FST, a text from the
+/// `.termtexts`. No id is renumbered. What the compaction of a dictionary's
+/// dead texts runs (`dictionary_commit::compact_dead_texts`), with the ids
+/// the live segments' `.gmap`s name.
+pub fn compact_parts_keeping(
+    directory: &dyn Directory,
+    sfx_parts: Vec<OwnedBytes>,
+    termtexts_parts: Vec<OwnedBytes>,
+    field_id: u32,
+    out: u64,
+    keep: Option<&(dyn Fn(u32) -> bool + Sync)>,
+) -> crate::Result<CompactReport> {
     let mut report = CompactReport { parts: sfx_parts.len(), ..CompactReport::default() };
     if sfx_parts.is_empty() {
         return Ok(report);
@@ -200,7 +217,7 @@ pub fn compact_parts(
     // native build they run side by side (the texts pass is a quarter of the
     // FST pass, and the fold is on the commit path). On wasm nothing is
     // spawned outside the scheduler: one after the other.
-    let (sfx_report, texts_report) = merge_both(directory, &sfx_parts, &termtexts_parts, field_id, out)?;
+    let (sfx_report, texts_report) = merge_both(directory, &sfx_parts, &termtexts_parts, field_id, out, keep)?;
     report.keys = sfx_report.keys;
     report.keys_merged = sfx_report.keys_merged;
     report.sfx_bytes = sfx_report.sfx_bytes;
@@ -252,6 +269,9 @@ struct OutBatch<'a> {
 enum RecRef<'a> {
     Verbatim(&'a [u8]),
     Owned(u32, u32),
+    /// Every parent of the key was refused (`compact_parts_keeping`): the
+    /// key leaves the FST.
+    Dropped,
 }
 
 impl InBatch {
@@ -279,7 +299,7 @@ const PIPELINE_DEPTH: usize = 64;
 /// The `.sfx` pass of `compact_parts`: FST and parents streamed to two
 /// temporary files, then the container assembled from them (the header
 /// needs their lengths).
-fn merge_sfx(directory: &dyn Directory, sfx_parts: &[OwnedBytes], field_id: u32, out: u64) -> crate::Result<CompactReport> {
+fn merge_sfx(directory: &dyn Directory, sfx_parts: &[OwnedBytes], field_id: u32, out: u64, keep: Option<&(dyn Fn(u32) -> bool + Sync)>) -> crate::Result<CompactReport> {
     let t = Instant::now();
     let mut report = CompactReport::default();
     let fst_tmp = PathBuf::from(dictionary_file_name(out, field_id, "sfx.fst.tmp"));
@@ -327,6 +347,7 @@ fn merge_sfx(directory: &dyn Directory, sfx_parts: &[OwnedBytes], field_id: u32,
                 let record: &[u8] = match batch.rec[i] {
                     RecRef::Verbatim(bytes) => bytes,
                     RecRef::Owned(a, b) => &batch.owned[a as usize..b as usize],
+                    RecRef::Dropped => continue,
                 };
                 // The table's layout (`lucivy_fst::OutputTable`): a varint
                 // length before each record, the FST value its offset.
@@ -351,6 +372,25 @@ fn merge_sfx(directory: &dyn Directory, sfx_parts: &[OwnedBytes], field_id: u32,
             };
             for i in 0..batch.len() {
                 let key = batch.key(i);
+                if let Some(keep) = keep {
+                    // Filtering: every record is decoded, its refused parents
+                    // dropped, and re-encoded (or the key dropped).
+                    scratch.clear();
+                    let one: [(usize, u64); 1];
+                    let held: &[(usize, u64)] = match batch.src[i] {
+                        SrcRef::One(part, value) => { one = [(part, value)]; &one }
+                        SrcRef::Many(a, n) => &batch.held[a as usize..(a + n) as usize],
+                    };
+                    for &(part, value) in held {
+                        match &tables[part] {
+                            Some(table) => scratch.extend(decode_parent_entries_v8(table.get(value), key)),
+                            None => scratch.extend(readers[part].decode_parents(value, key)),
+                        }
+                    }
+                    scratch.retain(|p| keep(p.raw_ordinal as u32));
+                    rec.push(if scratch.is_empty() { RecRef::Dropped } else { encode_into(&mut owned, scratch, key) });
+                    continue;
+                }
                 let r = match batch.src[i] {
                     // The random read into the part's table happens here,
                     // off the writer's thread.
@@ -531,7 +571,7 @@ fn merge_sfx(directory: &dyn Directory, sfx_parts: &[OwnedBytes], field_id: u32,
 }
 
 /// The `.termtexts` pass of `compact_parts`: the heap merge, three passes.
-fn merge_termtexts(directory: &dyn Directory, termtexts_parts: &[OwnedBytes], field_id: u32, out: u64) -> crate::Result<CompactReport> {
+fn merge_termtexts(directory: &dyn Directory, termtexts_parts: &[OwnedBytes], field_id: u32, out: u64, keep: Option<&(dyn Fn(u32) -> bool + Sync)>) -> crate::Result<CompactReport> {
     let t = Instant::now();
     let mut report = CompactReport::default();
     {
@@ -542,7 +582,7 @@ fn merge_termtexts(directory: &dyn Directory, termtexts_parts: &[OwnedBytes], fi
         let path = PathBuf::from(dictionary_file_name(out, field_id, "termtexts"));
         let mut w = directory.open_write(&path)?;
         let mut counted = CountingWrite { inner: &mut w, written: 0 };
-        report.texts = termtexts_v3::write_merged(&parts, &mut counted)?;
+        report.texts = termtexts_v3::write_merged_keeping(&parts, keep, &mut counted)?;
         report.termtexts_bytes = counted.written;
         w.terminate()?;
     }
@@ -552,22 +592,24 @@ fn merge_termtexts(directory: &dyn Directory, termtexts_parts: &[OwnedBytes], fi
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn merge_both(directory: &dyn Directory, sfx_parts: &[OwnedBytes], termtexts_parts: &[OwnedBytes], field_id: u32, out: u64)
+fn merge_both(directory: &dyn Directory, sfx_parts: &[OwnedBytes], termtexts_parts: &[OwnedBytes], field_id: u32, out: u64,
+    keep: Option<&(dyn Fn(u32) -> bool + Sync)>)
     -> crate::Result<(CompactReport, CompactReport)>
 {
     std::thread::scope(|scope| {
-        let texts = scope.spawn(|| merge_termtexts(directory, termtexts_parts, field_id, out));
-        let sfx = merge_sfx(directory, sfx_parts, field_id, out);
+        let texts = scope.spawn(|| merge_termtexts(directory, termtexts_parts, field_id, out, keep));
+        let sfx = merge_sfx(directory, sfx_parts, field_id, out, keep);
         let texts = texts.join().map_err(|_| system_error("dictionary texts pass", "thread panicked"))?;
         Ok((sfx?, texts?))
     })
 }
 
 #[cfg(target_arch = "wasm32")]
-fn merge_both(directory: &dyn Directory, sfx_parts: &[OwnedBytes], termtexts_parts: &[OwnedBytes], field_id: u32, out: u64)
+fn merge_both(directory: &dyn Directory, sfx_parts: &[OwnedBytes], termtexts_parts: &[OwnedBytes], field_id: u32, out: u64,
+    keep: Option<&(dyn Fn(u32) -> bool + Sync)>)
     -> crate::Result<(CompactReport, CompactReport)>
 {
-    Ok((merge_sfx(directory, sfx_parts, field_id, out)?, merge_termtexts(directory, termtexts_parts, field_id, out)?))
+    Ok((merge_sfx(directory, sfx_parts, field_id, out, keep)?, merge_termtexts(directory, termtexts_parts, field_id, out, keep)?))
 }
 
 struct CountingWrite<'w> {

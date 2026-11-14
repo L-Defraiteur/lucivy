@@ -59,6 +59,36 @@ impl Message for SuGarbageCollectMsg {
     fn decode(_: &[u8]) -> Result<Self, String> { Ok(Self) }
 }
 
+/// Compaction of the shard dictionary's dead texts (`dictionary_commit::
+/// compact_dead_texts`): in the actor, so that no commit, merge or fold
+/// interleaves. Refused while a merge runs, a fold runs, a pair is pending
+/// or a segment is not committed.
+pub(crate) struct SuCompactDictionaryMsg;
+impl Message for SuCompactDictionaryMsg {
+    fn type_tag() -> u64 { type_tag_hash(b"SuCompactDictionaryMsg") }
+    fn encode(&self) -> Vec<u8> { vec![] }
+    fn decode(_: &[u8]) -> Result<Self, String> { Ok(Self) }
+}
+
+/// The answer of `SuCompactDictionaryMsg`.
+pub(crate) struct SuDeadTextsReply(pub super::dictionary_commit::DeadTextsReport);
+impl Message for SuDeadTextsReply {
+    fn type_tag() -> u64 { type_tag_hash(b"SuDeadTextsReply") }
+    fn encode(&self) -> Vec<u8> {
+        let r = &self.0;
+        [r.generation.map_or(0, |g| g + 1), r.texts_before, r.texts_after, r.bytes_before, r.bytes_after]
+            .iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+    fn decode(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() < 40 { return Err("too short".into()); }
+        let v = |i: usize| u64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap());
+        Ok(Self(super::dictionary_commit::DeadTextsReport {
+            generation: v(0).checked_sub(1),
+            texts_before: v(1), texts_after: v(2), bytes_before: v(3), bytes_after: v(4),
+        }))
+    }
+}
+
 pub(crate) struct SuStartMergeMsg;
 impl Message for SuStartMergeMsg {
     fn type_tag() -> u64 { type_tag_hash(b"SuStartMergeMsg") }
@@ -460,6 +490,58 @@ impl SegmentUpdaterState {
         garbage_collect_files(&self.shared)
     }
 
+    /// `SuCompactDictionaryMsg`: the ids every committed segment's `.gmap`
+    /// cites, per field, then the dictionary rewritten over them and
+    /// `meta.json` with it.
+    fn handle_compact_dictionary(&mut self) -> crate::Result<super::dictionary_commit::DeadTextsReport> {
+        use crate::suffix_fst::dictionary::DICTIONARY_SFX_VERSION;
+        let index = self.shared.index.clone();
+        if index.settings().sfx_version != DICTIONARY_SFX_VERSION || index.sfx_dictionary().is_none() {
+            return Ok(Default::default());
+        }
+        let refuse = |why: String| Err(crate::LucivyError::SystemError(format!("dictionary compaction refused: {why}")));
+        if !self.merging.is_empty() {
+            return refuse(format!("{} segment(s) in a running merge", self.merging.len()));
+        }
+        let committed = self.shared.segment_manager.committed_segment_metas();
+        let all = self.shared.segment_manager.segment_entries().len();
+        if all != committed.len() {
+            return refuse(format!("{} uncommitted segment(s)", all - committed.len()));
+        }
+        let fold = index.dictionary_fold().clone();
+        if !fold.begin() {
+            return refuse("a dictionary fold is running".into());
+        }
+        let result = (|| -> crate::Result<super::dictionary_commit::DeadTextsReport> {
+            let mut live: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+            for meta in committed {
+                let reader = crate::SegmentReader::open(&index.segment(meta))?;
+                let fields: Vec<crate::schema::Field> = reader.sfx_fields().collect();
+                for field in fields {
+                    let Some(file) = reader.sfx_index_file("gmap", field) else { continue };
+                    let bytes = file.read_bytes()?;
+                    let gmap = crate::suffix_fst::gmap::GmapReader::open(bytes.as_slice()).ok_or_else(||
+                        crate::LucivyError::SystemError(format!("field {}: unreadable .gmap", field.field_id())))?;
+                    live.entry(field.field_id()).or_default().extend(gmap.iter());
+                }
+            }
+            for ids in live.values_mut() {
+                ids.sort_unstable();
+                ids.dedup();
+            }
+            let report = super::dictionary_commit::compact_dead_texts(&index, &live)?;
+            if report.generation.is_some() {
+                let meta = self.shared.load_meta();
+                self.shared.save_metas(meta.opstamp, meta.payload.clone())?;
+                super::dictionary_commit::delete_consumed_pairs(&self.shared)?;
+                garbage_collect_files(&self.shared)?;
+            }
+            Ok(report)
+        })();
+        fold.finish();
+        result
+    }
+
 }
 
 // ─── Actor creation ─────────────────────────────────────────────────────────
@@ -497,6 +579,21 @@ pub(crate) fn create_segment_updater_actor(
             if let Some(reply) = reply {
                 match result {
                     Ok(opstamp) => reply.send(SuOpsReply { opstamp }),
+                    Err(e) => reply.send_err(e),
+                }
+            }
+            ActorStatus::Continue
+        },
+    ));
+
+    // CompactDictionary
+    actor.register(TypedHandler::<SuCompactDictionaryMsg, _>::new(
+        |state, _msg, reply, _local, _ctx| {
+            let su = state.get_mut::<SegmentUpdaterState>().unwrap();
+            let result = su.handle_compact_dictionary();
+            if let Some(reply) = reply {
+                match result {
+                    Ok(report) => reply.send(SuDeadTextsReply(report)),
                     Err(e) => reply.send_err(e),
                 }
             }
