@@ -1,0 +1,131 @@
+//! Maintenance of a sharded index in one call: purge a set of `_node_id` the
+//! caller knows to be gone (documents whose node no longer exists in the
+//! caller's graph), then compact (merge the segments, which gives back the
+//! deleted documents' bytes), with an `index_report` before and after.
+//!
+//! The caller owns the list: lucivy cannot tell an orphan from a document.
+//! An id the index does not hold costs nothing and is counted as absent.
+
+use crate::index_report::IndexReport;
+use crate::sharded_handle::ShardedHandle;
+
+/// What to do. The default does nothing but report.
+#[derive(Clone, Debug)]
+pub struct MaintenanceRequest {
+    /// `_node_id` to delete.
+    pub purge_node_ids: Vec<u64>,
+    /// Merge the segments of every shard after the purge.
+    pub compact: bool,
+    /// Largest merged segment, in documents (`compact`).
+    pub compact_max_docs: usize,
+}
+
+impl Default for MaintenanceRequest {
+    fn default() -> Self {
+        Self { purge_node_ids: Vec::new(), compact: false, compact_max_docs: 10_000_000 }
+    }
+}
+
+/// What was done, and the index before and after.
+#[derive(Clone, Debug)]
+pub struct MaintenanceReport {
+    pub before: IndexReport,
+    pub after: IndexReport,
+    /// Distinct ids asked for.
+    pub requested: u64,
+    /// Live documents removed by the purge.
+    pub purged: u64,
+    /// Ids asked for that the index did not hold.
+    pub absent: u64,
+    /// Merge rounds the compaction ran.
+    pub merge_rounds: usize,
+    pub purge_ms: u64,
+    pub compact_ms: u64,
+}
+
+impl MaintenanceReport {
+    pub fn summary(&self) -> String {
+        let (written_b, deleted_b) = self.before.documents();
+        let (written_a, deleted_a) = self.after.documents();
+        format!(
+            "purge: {} asked, {} removed, {} absent ({} ms); compaction: {} rounds ({} ms)\n\
+             documents {} → {} live, deleted in segments {} → {}, segments {} → {}, index {} → {} bytes (×{:.2} → ×{:.2} its text)",
+            self.requested, self.purged, self.absent, self.purge_ms, self.merge_rounds, self.compact_ms,
+            written_b - deleted_b, written_a - deleted_a, deleted_b, deleted_a,
+            self.before.segments.len(), self.after.segments.len(),
+            self.before.index_bytes, self.after.index_bytes, self.before.ratio(), self.after.ratio(),
+        )
+    }
+}
+
+impl ShardedHandle {
+    /// The `_node_id` of every live document, ascending: what the caller
+    /// compares with its graph to find the orphans it then gives `maintain`.
+    pub fn live_node_ids(&self) -> Result<Vec<u64>, String> {
+        let mut ids = Vec::new();
+        for shard in 0..self.num_shards() {
+            let handle = self.shard(shard).ok_or_else(|| format!("shard_{shard} missing"))?;
+            for segment in handle.reader.searcher().segment_readers() {
+                let column = segment.fast_fields().u64(crate::handle::NODE_ID_FIELD)
+                    .map_err(|e| format!("fast field {}: {e}", crate::handle::NODE_ID_FIELD))?;
+                let alive = segment.alive_bitset();
+                for doc in 0..segment.max_doc() {
+                    if alive.is_some_and(|a| !a.is_alive(doc)) {
+                        continue;
+                    }
+                    if let Some(id) = column.first(doc) {
+                        ids.push(id);
+                    }
+                }
+            }
+        }
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
+    /// Purge `request.purge_node_ids`, commit, wait for the merges, then
+    /// compact when asked; `index_report` before and after.
+    ///
+    /// Meant for a maintenance window: the counts are live documents before
+    /// and after, so a writer adding documents meanwhile would skew `purged`.
+    /// A request with no id and no compaction writes nothing.
+    pub fn maintain(&self, request: &MaintenanceRequest) -> Result<MaintenanceReport, String> {
+        let before = self.index_report()?;
+        let ids: std::collections::BTreeSet<u64> = request.purge_node_ids.iter().copied().collect();
+        let requested = ids.len() as u64;
+
+        let started = std::time::Instant::now();
+        let live_before = self.num_docs();
+        if !ids.is_empty() {
+            for &id in &ids {
+                self.delete_by_node_id(id)?;
+            }
+            self.commit()?;
+            self.wait_merges_quiet()?;
+        }
+        let purged = live_before.saturating_sub(self.num_docs());
+        let purge_ms = started.elapsed().as_millis() as u64;
+
+        let started = std::time::Instant::now();
+        let merge_rounds = if request.compact {
+            let rounds = self.compact(request.compact_max_docs)?;
+            self.wait_merges_quiet()?;
+            rounds
+        } else {
+            0
+        };
+        let compact_ms = started.elapsed().as_millis() as u64;
+
+        let after = self.index_report()?;
+        Ok(MaintenanceReport {
+            before,
+            after,
+            requested,
+            purged,
+            absent: requested.saturating_sub(purged),
+            merge_rounds,
+            purge_ms,
+            compact_ms,
+        })
+    }
+}
