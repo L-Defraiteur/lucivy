@@ -386,6 +386,27 @@ impl SegmentUpdater {
         }
     }
 
+    /// Rewrite the shard dictionary over the ids the committed segments
+    /// cite (`SuCompactDictionaryMsg`).
+    pub fn compact_dictionary(&self) -> crate::Result<super::dictionary_commit::DeadTextsReport> {
+        if !self.is_alive() {
+            return Err(LucivyError::SystemError("Segment updater killed".to_string()));
+        }
+        let (env, rx) = super::segment_updater_actor::SuCompactDictionaryMsg.into_request();
+        self.actor_ref
+            .send(env)
+            .map_err(|_| LucivyError::SystemError("Segment updater actor died".to_string()))?;
+        match crate::actor::scheduler::global_scheduler().wait(rx, "compact_dictionary") {
+            Ok(bytes) => <super::segment_updater_actor::SuDeadTextsReply as crate::actor::Message>::decode(&bytes)
+                .map(|r| r.0)
+                .map_err(LucivyError::SystemError),
+            Err(err_bytes) => Err(
+                LucivyError::decode(&err_bytes)
+                    .unwrap_or_else(|e| LucivyError::SystemError(format!("decode: {e}")))
+            ),
+        }
+    }
+
     pub(crate) fn make_merge_operation(&self, segment_ids: &[SegmentId]) -> MergeOperation {
         let commit_opstamp = self.load_meta().opstamp;
         MergeOperation::new(commit_opstamp, segment_ids.to_vec())

@@ -12,6 +12,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use ld_lucivy::suffix_fst::gmap::GmapReader;
+use ld_lucivy::{Directory, HasLen};
 use lucivy_core::maintenance::MaintenanceRequest;
 use lucivy_core::query::{QueryConfig, SchemaConfig};
 use lucivy_core::sharded_handle::ShardedHandle;
@@ -83,5 +84,85 @@ fn a_merge_drops_the_ids_of_deleted_documents() {
         assert_eq!(answers(&purged, word), answers(&fresh, word), "[check: same-hits-and-scores] {word}");
     }
     purged.close().unwrap();
+    fresh.close().unwrap();
+}
+
+/// Bytes of the shard dictionary's files by extension.
+fn dictionary_files(index: &ShardedHandle) -> Vec<(String, u64)> {
+    let dir = index.shard(0).unwrap().index.directory().clone();
+    let mut by_ext: BTreeMap<String, u64> = BTreeMap::new();
+    for path in dir.list_managed_files() {
+        let name = path.to_string_lossy().to_string();
+        let Some(rest) = name.strip_prefix("dict-") else { continue };
+        let ext = rest.splitn(3, '.').nth(2).unwrap_or("").to_string();
+        let bytes = dir.open_read(&path).map(|f| f.len() as u64).unwrap_or(0);
+        *by_ext.entry(ext).or_default() += bytes;
+    }
+    by_ext.into_iter().collect()
+}
+
+fn dictionary_bytes(index: &ShardedHandle) -> u64 {
+    *index.index_report().unwrap().bytes_by_kind.get("dictionary").unwrap_or(&0)
+}
+
+/// After `maintain` (purge, then compaction), the shard dictionary holds
+/// only the texts of the live documents: its bytes are those of a fresh
+/// index of the same documents: the same texts, and the bytes within the
+/// margin of the kept ids' table (no id is renumbered).
+#[test]
+fn maintain_gives_back_the_dictionary_of_deleted_documents() {
+    let purged_dir = common::scratch("dead-texts-purged");
+    let fresh_dir = common::scratch("dead-texts-fresh");
+    let purged = ShardedHandle::create(purged_dir.path().to_str().unwrap(), &config()).unwrap();
+    for batch in 0..4u64 {
+        for i in batch * 100..(batch + 1) * 100 {
+            purged.add_document_json(i, &serde_json::json!({ "content": text(i) })).unwrap();
+        }
+        purged.commit().unwrap();
+    }
+    purged.wait_merges_quiet().unwrap();
+    let full = dictionary_bytes(&purged);
+    let before: Vec<_> = ["shared", "uniq2x", "tail4", "words here"].iter().map(|w| answers(&purged, w)).collect();
+    let orphans: Vec<u64> = (0..400).filter(|i| i % 2 == 1).collect();
+    let report = purged.maintain(&MaintenanceRequest { purge_node_ids: orphans.clone(), compact: true, ..Default::default() }).unwrap();
+
+    let fresh = ShardedHandle::create(fresh_dir.path().to_str().unwrap(), &config()).unwrap();
+    for i in (0..400u64).filter(|i| i % 2 == 0) {
+        fresh.add_document_json(i, &serde_json::json!({ "content": text(i) })).unwrap();
+    }
+    fresh.commit().unwrap();
+    let fresh_report = fresh.maintain(&MaintenanceRequest { compact: true, ..Default::default() }).unwrap();
+    eprintln!("dictionary texts: purged {:?}, fresh {:?}", report.dictionary_texts, fresh_report.dictionary_texts);
+    assert_eq!(report.dictionary_texts.1, fresh_report.dictionary_texts.1, "[check: the-texts-of-a-fresh-index]");
+    for (name, purged_part, fresh_part) in dictionary_files(&purged).into_iter().zip(dictionary_files(&fresh)).map(|((n, a), (_, b))| (n, a, b)) {
+        eprintln!("  {name}: purged {purged_part}, fresh {fresh_part}");
+    }
+
+    let (dead, live) = (dictionary_bytes(&purged), dictionary_bytes(&fresh));
+    let margin = (dead as f64 - live as f64).abs() / live as f64;
+    eprintln!("dictionary bytes: all 400 {full}, purged {dead}, fresh {live} (margin {:.2} %)", margin * 100.0);
+    assert!(dead < full, "[check: the-dictionary-shrinks]");
+    // The texts are the fresh index's exactly (checked above); the bytes
+    // differ by the ids' table of the `.termtexts`, which names the kept ids
+    // by runs: no id is renumbered, so deleting every other document leaves
+    // the most runs there can be. Measured on 14 November 2026: .sfx 50 577
+    // against 50 888, .termtexts 11 862 against 10 174, 2.25 % in all.
+    assert!(margin <= 0.05, "[check: the-dictionary-of-a-fresh-index] {dead} vs {live}");
+
+    // Same hits and scores as before the purge, minus the orphans; and as the fresh index.
+    for (word, was) in ["shared", "uniq2x", "tail4", "words here"].iter().zip(before) {
+        let now = answers(&purged, word);
+        let expected: BTreeMap<u64, u32> = was.into_iter().filter(|(id, _)| id % 2 == 0).map(|(id, _)| (id, 0)).collect();
+        assert_eq!(now.keys().collect::<Vec<_>>(), expected.keys().collect::<Vec<_>>(), "[check: same-hits-minus-the-orphans] {word}");
+        assert_eq!(now, answers(&fresh, word), "[check: same-hits-and-scores-as-fresh] {word}");
+    }
+    // The dictionary on disk is the compacted one: reopened, same answers.
+    purged.close().unwrap();
+    let reopened = ShardedHandle::open(purged_dir.path().to_str().unwrap()).unwrap();
+    assert_eq!(dictionary_bytes(&reopened), dead, "[check: the-compacted-dictionary-survives-reopening]");
+    for word in ["shared", "uniq2x", "tail4"] {
+        assert_eq!(answers(&reopened, word), answers(&fresh, word), "[check: same-answers-after-reopening] {word}");
+    }
+    reopened.close().unwrap();
     fresh.close().unwrap();
 }

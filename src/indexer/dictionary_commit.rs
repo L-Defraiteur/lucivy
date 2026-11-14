@@ -35,7 +35,7 @@ use std::sync::Arc;
 use crate::directory::Directory;
 use crate::index::Index;
 use crate::suffix_fst::dictionary::{decode_minted_texts, find_pair, pair_file_names, DICTIONARY_SFX_VERSION, SfxDictionary, LEGACY_MINTED_SFX_EXT, LEGACY_MINTED_TEXTS_EXT, MINTED_SFX_EXT, MINTED_TEXTS_EXT};
-use crate::suffix_fst::dictionary_compact::{choose_compaction, compact_generations, compact_parts, generation_bytes, generation_sfx_bytes, remove_leftovers, write_generation};
+use crate::suffix_fst::dictionary_compact::{choose_compaction, compact_generations, compact_parts, compact_parts_keeping, generation_bytes, generation_sfx_bytes, remove_leftovers, write_generation};
 use crate::suffix_fst::termtexts_v3::TermTextsReaderV3;
 use common::OwnedBytes;
 
@@ -304,6 +304,95 @@ fn fold_once(index: &Index, verbose: bool) -> crate::Result<bool> {
             snapshot.pending_segments.len(), t_open.elapsed().as_secs_f64() * 1e3);
     }
     Ok(true)
+}
+
+/// What `compact_dead_texts` did.
+#[derive(Debug, Default, Clone)]
+pub struct DeadTextsReport {
+    /// The generation written, or `None` when there was nothing to do.
+    pub generation: Option<u64>,
+    /// Texts in the live generations before.
+    pub texts_before: u64,
+    /// Texts in the generation written.
+    pub texts_after: u64,
+    /// Bytes of the live generations before.
+    pub bytes_before: u64,
+    /// Bytes of the generation written.
+    pub bytes_after: u64,
+}
+
+/// Merge every live generation into one that keeps only the ids `live`
+/// names per field — the ids the live segments' `.gmap`s cite — then swap
+/// the live dictionary. A text no live document holds any more leaves the
+/// dictionary; no id is renumbered and no segment changes. The caller holds
+/// the fold slot, has checked that no pair is pending and that nothing can
+/// mint or merge meanwhile, and writes `meta.json` afterwards
+/// (`segment_updater_actor`, `SuCompactDictionaryMsg`).
+pub(crate) fn compact_dead_texts(
+    index: &Index,
+    live: &std::collections::HashMap<u32, Vec<u32>>,
+) -> crate::Result<DeadTextsReport> {
+    let directory = index.directory();
+    let dictionary = live_dictionary(index)?;
+    let snapshot = dictionary.meta().clone();
+    if !snapshot.pending_segments.is_empty() {
+        return Err(crate::LucivyError::SystemError(format!(
+            "dictionary compaction: {} pending pair(s) — fold first", snapshot.pending_segments.len())));
+    }
+    let field_ids = snapshot.field_ids.clone();
+    let mut report = DeadTextsReport {
+        bytes_before: snapshot.generations.iter().map(|&g| generation_bytes(directory, g, &field_ids)).sum(),
+        ..DeadTextsReport::default()
+    };
+    if snapshot.generations.is_empty() {
+        return Ok(report);
+    }
+    let mut next_generation = snapshot.next_generation.max(1);
+    let generation = next_generation;
+    next_generation += 1;
+    remove_leftovers(directory, generation, &field_ids)?;
+    let empty: Vec<u32> = Vec::new();
+    for &field_id in &field_ids {
+        let mut sfx_parts: Vec<OwnedBytes> = Vec::new();
+        let mut termtexts_parts: Vec<OwnedBytes> = Vec::new();
+        for &g in &snapshot.generations {
+            let sfx = directory.open_read(std::path::Path::new(&crate::suffix_fst::dictionary::dictionary_file_name(g, field_id, "sfx")));
+            let texts = directory.open_read(std::path::Path::new(&crate::suffix_fst::dictionary::dictionary_file_name(g, field_id, "termtexts")));
+            let (Ok(sfx), Ok(texts)) = (sfx, texts) else { continue };
+            let texts = texts.read_bytes()?;
+            if let Some(r) = TermTextsReaderV3::open(texts.as_slice()) {
+                report.texts_before += r.num_terms() as u64;
+            }
+            sfx_parts.push(sfx.read_bytes()?);
+            termtexts_parts.push(texts);
+        }
+        let ids = live.get(&field_id).unwrap_or(&empty);
+        if sfx_parts.is_empty() {
+            write_generation(directory, generation, field_id, &[])?;
+            continue;
+        }
+        let keep = |id: u32| ids.binary_search(&id).is_ok();
+        let compacted = compact_parts_keeping(directory, sfx_parts, termtexts_parts, field_id, generation, Some(&keep))?;
+        report.texts_after += compacted.texts as u64;
+    }
+    report.bytes_after = generation_bytes(directory, generation, &field_ids);
+    report.generation = Some(generation);
+
+    let fold = index.dictionary_fold().clone();
+    let _meta_lock = fold.lock_meta();
+    let current = live_dictionary(index)?;
+    let mut meta = current.meta().clone();
+    if !meta.pending_segments.is_empty() || meta.generations != snapshot.generations {
+        return Err(crate::LucivyError::SystemError(
+            "dictionary compaction: the live dictionary changed meanwhile".to_string()));
+    }
+    meta.next_ids = current.next_ids();
+    meta.generations = vec![generation];
+    meta.next_generation = next_generation;
+    let next = SfxDictionary::open(directory, &meta, Some(&current));
+    index.set_sfx_dictionary(Some(Arc::new(next)));
+    fold.mark_changed();
+    Ok(report)
 }
 
 /// After `save_metas`: delete the pairs of committed segments that the
