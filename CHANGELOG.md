@@ -1,3 +1,44 @@
+Lucivy 4.3.8 — 15 November 2026
+================================
+
+Two fixes and an addition; the index format is unchanged.
+
+- **Fixed: merges kept the ids of deleted documents' words.** The `.gmap` of a
+  merged segment was the union of its inputs': the global id of a word whose
+  every document had been deleted stayed, with empty postings, and nothing ever
+  learned it was dead (`merge_segments_dict`). A merge now keeps only the ids
+  that still have a live document (`live_ids_of`, a pass over the documents of
+  the postings, not their positions). Cost, measured on a 90 000-document copy:
+  indexing unchanged (within noise), a compaction of segments carrying
+  deletions about 12 % longer.
+- **Fixed: a lone segment never dropped its deletions.** Compaction
+  (`SuCompactMsg`) only merged groups of two segments or more; a shard reduced
+  to one segment kept its deleted documents for ever. A one-segment group is
+  now merged when it carries deletions.
+- **Added: the dictionary compaction.** `IndexWriter::compact_dictionary`
+  rewrites the shard dictionary (sfx v4) over the ids the committed segments'
+  `.gmap`s cite: a parent no live document holds is dropped from its key's
+  record, a key left without one leaves the FST, a dead text leaves the
+  `.termtexts`. No id is renumbered and no segment changes. It runs in the
+  segment updater, refused while a merge or a fold runs, a pair is pending or a
+  segment is uncommitted.
+- **Added: `ShardedHandle::maintain` (lucivy-core).** Purge a list of
+  `_node_id`, compact (segments and dictionaries), and get `index_report` before
+  and after in one call. A purge of more than `max_purge_ratio` (0.5) of the
+  live documents is refused before anything is deleted. `live_node_ids()` lists
+  the live ids. On the code index of a repository (`Lucivy_Scope`, 88 471
+  documents, 8 809 of them stale): 4.27 GB → 1.16 GB, the dictionary
+  513.8 → 400.7 MB.
+- **Added: `index_report` (lucivy-core)**: segments with written and deleted
+  documents, per text field the count, bytes, size distribution, largest
+  documents and exact duplicates, the bytes by family and the index-to-text
+  ratio. Read-only.
+- **Fixed (cpp): the cache directory of an index on a `BlobBackend` is removed**
+  when the `BlobCache` is dropped, also when creating or opening fails.
+- Tests write in their own temporary directories, never under a fixed path of
+  `/tmp`; ignored measurement tests for the light profile, the cost of a
+  filtered search and the anatomy of a dictionary.
+
 Lucivy 4.3.7 — 14 November 2026
 ================================
 

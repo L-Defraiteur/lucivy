@@ -1,4 +1,4 @@
-# lucivy 4.3.7
+# lucivy 4.3.8
 
 [![PyPI](https://img.shields.io/pypi/v/lucivy?label=PyPI&color=blue)](https://pypi.org/project/lucivy/)
 [![npm](https://img.shields.io/npm/v/lucivy?label=npm&color=cb3837)](https://www.npmjs.com/package/lucivy)
@@ -30,6 +30,14 @@ lucivy's own source from GitHub and indexes it in your browser in a few seconds.
 tab. The second half is typed by hand — `index postgres`, then `--strict
 "heap_insert"`, `"CREATE INDEX CONCURRENTLY"` (27 hits, 11 ms), `--fuzzy 1
 "vaccum"` (17 ms) and `--regex "ExecInit[A-Z][a-zA-Z]+\("` (20 ms).*
+
+### What's new in 4.3.8
+
+A patch release. The index format is unchanged.
+
+- **Merges forget the words of deleted documents.** A merge kept, in the merged segment, the id of every word whose documents had all been deleted, with empty postings, so the shard dictionary could never drop its text. A merge now keeps only the words that still have a live document. On the index of a 90 000-document code repository, after purging 8 809 stale documents and compacting, the index went from 4.27 GB to 1.30 GB, then to 1.16 GB with the dictionary compaction below.
+- **A shard compacted down to one segment drops its deleted documents.** Compaction only merged groups of two segments or more, so the last segment of a shard kept its deletions for ever. It is now rewritten when it holds deleted documents.
+- **Maintenance in one call (Rust).** `ShardedHandle::maintain` deletes a list of `_node_id` given by the caller, compacts, and returns the index report before and after; it refuses a purge of more than half the live documents (`max_purge_ratio`), the mark of a failed read of the caller's data. With `compact`, it also rewrites each shard dictionary without the texts no live document holds (513.8 → 400.7 MB on that index). `live_node_ids()` gives the ids to compare with. `index_report()` says what an index is made of: segments, fields, bytes by family.
 
 ### What's new in 4.3.7
 
@@ -194,7 +202,7 @@ A patch release that fixes concurrency between searches and writes. The index fo
   3.0.x does not open a 4.0 index; the first commit in 4.0 converts without
   return.
 - One version number for the whole workspace: `ld-lucivy`, `lucivy-core`,
-  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.3.7.
+  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.3.8.
 
 3.0.x brought SFX v3 (exact byte spans on every query mode), boolean syntax,
 Jaro-Winkler, query warnings, bring-your-own-storage in every binding, snapshots

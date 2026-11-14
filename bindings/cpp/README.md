@@ -2,7 +2,15 @@
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. From C++. Runs in your process, in your transaction (`lucivy::BlobBackend`), and the same engine runs in the browser. Powered by Rust via a CXX bridge, MIT.
 
-Version 4.3.7 — the lucivy engine of the same number (SFX v3 suffix index, the shared dictionary by default).
+Version 4.3.8 — the lucivy engine of the same number (SFX v3 suffix index, the shared dictionary by default).
+
+### What's new in 4.3.8
+
+A patch release. The index format is unchanged.
+
+- **Merges forget the words of deleted documents.** A merge kept, in the merged segment, the id of every word whose documents had all been deleted, with empty postings, so the shard dictionary could never drop its text. A merge now keeps only the words that still have a live document. On the index of a 90 000-document code repository, after purging 8 809 stale documents and compacting, the index went from 4.27 GB to 1.30 GB, then to 1.16 GB with the dictionary compaction below.
+- **A shard compacted down to one segment drops its deleted documents.** Compaction only merged groups of two segments or more, so the last segment of a shard kept its deletions for ever. It is now rewritten when it holds deleted documents.
+- **No cache directory left behind.** The cache directory of an index on a `BlobBackend` is removed when the index is dropped, also when its creation or opening fails.
 
 ### What's new in 4.3.7
 

@@ -1,8 +1,15 @@
-# lucivy 4.3.7
+# lucivy 4.3.8
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. From Python. Runs in your process, in your transaction (bring your own storage), and the same engine runs in the browser. Powered by Rust, MIT.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
+
+### What's new in 4.3.8
+
+A patch release. The index format is unchanged.
+
+- **Merges forget the words of deleted documents.** A merge kept, in the merged segment, the id of every word whose documents had all been deleted, with empty postings, so the shard dictionary could never drop its text. A merge now keeps only the words that still have a live document. On the index of a 90 000-document code repository, after purging 8 809 stale documents and compacting, the index went from 4.27 GB to 1.30 GB, then to 1.16 GB with the dictionary compaction below.
+- **A shard compacted down to one segment drops its deleted documents.** Compaction only merged groups of two segments or more, so the last segment of a shard kept its deletions for ever. It is now rewritten when it holds deleted documents.
 
 ### What's new in 4.3.7
 
@@ -144,7 +151,7 @@ Where a cell says "not with this analyzer", a purpose-built analyzer or plugin m
 ## Install
 
 ```bash
-pip install lucivy  # 4.3.7
+pip install lucivy  # 4.3.8
 ```
 
 ## Quick start
