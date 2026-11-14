@@ -29,6 +29,36 @@ fn banc(index: &ShardedHandle, champ: &str, mots: &[String]) -> BTreeMap<String,
         .collect()
 }
 
+/// Le relevé à froid : un `_node_id` par document VIVANT de `PURGE_TABLE`, un par ligne, dans
+/// `PURGE_SORTIE` ; sur stderr, le nombre de documents. Ouvre la table avec un writer : une copie, ou une
+/// base fermée dont on a l'instantané.
+#[test]
+#[ignore]
+fn node_ids_vivants() {
+    use std::io::Write;
+    let table = std::env::var("PURGE_TABLE").expect("PURGE_TABLE");
+    let mut sortie = std::io::BufWriter::new(std::fs::File::create(std::env::var("PURGE_SORTIE").expect("PURGE_SORTIE")).unwrap());
+    let index = ShardedHandle::open(&table).unwrap();
+    let mut n = 0u64;
+    for i in 0..index.num_shards() {
+        let shard = index.shard(i).expect("shard");
+        let searcher = shard.reader.searcher();
+        for reader in searcher.segment_readers() {
+            let colonne = reader.fast_fields().u64(lucivy_core::handle::NODE_ID_FIELD).expect("colonne _node_id");
+            for doc in 0..reader.max_doc() {
+                if reader.alive_bitset().is_some_and(|b| !b.is_alive(doc)) { continue; }
+                if let Some(id) = colonne.first(doc) {
+                    writeln!(sortie, "{id}").unwrap();
+                    n += 1;
+                }
+            }
+        }
+    }
+    sortie.flush().unwrap();
+    eprintln!("VIVANTS {table} : {n} documents (num_docs {})", index.num_docs());
+    index.close().unwrap();
+}
+
 #[test]
 #[ignore]
 fn purge_orphelins() {
@@ -42,6 +72,10 @@ fn purge_orphelins() {
     let champ = std::env::var("PURGE_CHAMP").unwrap_or_else(|_| "content".into());
     let mots: Vec<String> = std::env::var("PURGE_MOTS").expect("PURGE_MOTS").split(',').map(str::to_string).collect();
 
+    if ids.is_empty() {
+        eprintln!("BILAN {table} : aucun orphelin, rien n'est ouvert");
+        return;
+    }
     let index = ShardedHandle::open(&table).unwrap();
     let avant_docs = index.num_docs();
     let avant = index.index_report().unwrap();
