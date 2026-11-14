@@ -54,3 +54,58 @@ pub fn usable(root: &str, found: usize, min: usize, substitute: &str) -> bool {
         recipe(root)
     );
 }
+
+// ── Where a test writes (14 November 2026) ───────────────────────────────
+//
+// Tests used to write their indexes under fixed names in /tmp: never removed,
+// overwritten by the next run, and 1.7 GiB of them on one machine (a RAM-backed
+// /tmp). The rules, checked by `test_no_residue_under_tmp`:
+// - an index or any scratch file: `scratch(label)`, a directory removed when the
+//   returned guard drops, panic included;
+// - a report a person reads after the run: `report_path(name)`, under the
+//   target's own tmp directory (`CARGO_TARGET_TMPDIR`), not /tmp;
+// - a corpus a test reads: one of `CORPUS_ROOTS`, or `rag3db_clone()`.
+
+/// A fresh directory for one test, removed when the guard drops.
+pub fn scratch(label: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("lucivy-test-{label}-"))
+        .tempdir()
+        .expect("create a test scratch directory")
+}
+
+/// Where an ignored diagnostic test leaves a report to read after the run.
+pub fn report_path(name: &str) -> std::path::PathBuf {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("lucivy-reports");
+    std::fs::create_dir_all(&dir).expect("create the report directory");
+    dir.join(name)
+}
+
+/// Corpus roots tests read and never write (see `recipe`).
+pub const CORPUS_ROOTS: &[&str] = &[
+    "/tmp/lucivy-cmp", "/tmp/lucivy-cmp-90k", "/tmp/rag3db-bench", "/tmp/linux-bench",
+    "/tmp/lucivy_parity_native",
+];
+
+/// A clone of the rag3db repository for the corpus tests (`RAG3DB_ROOT` wins):
+/// kept between runs under the user's cache, not in /tmp.
+pub fn rag3db_clone() -> std::path::PathBuf {
+    if let Ok(root) = std::env::var("RAG3DB_ROOT") {
+        return root.into();
+    }
+    let base = std::env::var_os("XDG_CACHE_HOME").map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))
+        .unwrap_or_else(std::env::temp_dir);
+    let path = base.join("lucivy-tests").join("rag3db-clone");
+    if !path.exists() {
+        std::fs::create_dir_all(path.parent().unwrap()).expect("create the clone's parent");
+        eprintln!("Cloning https://github.com/L-Defraiteur/rag3db.git into {} ...", path.display());
+        let status = std::process::Command::new("git")
+            .args(["clone", "--depth", "1", "https://github.com/L-Defraiteur/rag3db.git"])
+            .arg(&path)
+            .status()
+            .expect("git clone failed");
+        assert!(status.success(), "git clone failed");
+    }
+    path
+}

@@ -30,6 +30,8 @@ regex = "1"
 regex-syntax = "0.8"
 
 [dev-dependencies]
+# Test directories that remove themselves (common::scratch), even when a test panics.
+tempfile = "3.12"
 postgres = "0.19"
 # test_touched_bytes: posix_fadvise / mincore, to count the bytes a query faults in
 libc = "0.2"
