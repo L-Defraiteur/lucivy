@@ -3,7 +3,10 @@
 //! documents? Documents are named by the hash of their stored `content` and `name`, since `_node_id`
 //! differs between two bases. Read-only on copies.
 //!
-//!     LUCIVY_CMP_A=<copy> LUCIVY_CMP_B=<copy> LUCIVY_CMP_QUERIES=<json [{"label", "query"}]> \
+//! With `LUCIVY_CMP_B_VISIBLE=1`, B is searched filtered to its documents whose content A also holds:
+//! the visible versions of an index that keeps closed ones, as rag3weaver's visibility filter would.
+//!
+//!     LUCIVY_CMP_A=<copy> LUCIVY_CMP_B=<copy> LUCIVY_CMP_QUERIES=<json [{"label", "query"}]> [LUCIVY_CMP_B_VISIBLE=1] \
 //!     cargo test --release -p lucivy-core --test test_compare_two_indexes -- --ignored --nocapture
 
 use std::collections::{BTreeMap, HashMap};
@@ -76,14 +79,17 @@ fn compare_two_indexes() {
     let only_a: u32 = a_set.iter().map(|(k, n)| n.saturating_sub(*b_set.get(k).unwrap_or(&0))).sum();
     let only_b: u32 = b_set.iter().map(|(k, n)| n.saturating_sub(*a_set.get(k).unwrap_or(&0))).sum();
     println!("stored documents: A {} B {} ; only in A {only_a}, only in B {only_b}", a_docs.len(), b_docs.len());
+    let visible: Option<std::collections::HashSet<u64>> = std::env::var("LUCIVY_CMP_B_VISIBLE").is_ok_and(|v| v == "1")
+        .then(|| b_docs.iter().filter(|(_, id)| a_set.contains_key(id)).map(|(n, _)| *n).collect());
+    if let Some(v) = &visible { println!("B searched filtered to {} documents whose content A holds", v.len()) }
     for entry in &queries {
         let label = entry["label"].as_str().unwrap();
         let q: QueryConfig = serde_json::from_value(entry["query"].clone()).unwrap();
-        let top = |index: &ShardedHandle, docs: &HashMap<u64, u64>| -> Vec<(u64, f32)> {
-            let r = index.search(&q, 10, None).unwrap();
+        let top = |index: &ShardedHandle, docs: &HashMap<u64, u64>, filter: Option<&std::collections::HashSet<u64>>| -> Vec<(u64, f32)> {
+            let r = match filter { Some(f) => index.search_filtered(&q, 10, None, f.clone()).unwrap(), None => index.search(&q, 10, None).unwrap() };
             index.node_ids_of(&r).unwrap().into_iter().zip(r.iter().map(|x| x.score)).map(|(n, s)| (*docs.get(&n).unwrap_or(&0), s)).collect()
         };
-        let (ta, tb) = (top(&a, &a_docs), top(&b, &b_docs));
+        let (ta, tb) = (top(&a, &a_docs, None), top(&b, &b_docs, visible.as_ref()));
         let same_ids = ta.iter().map(|x| x.0).collect::<Vec<_>>() == tb.iter().map(|x| x.0).collect::<Vec<_>>();
         let worst = ta.iter().zip(&tb).map(|(x, y)| ((x.1 - y.1) as f64).abs() / (x.1 as f64).abs().max(1e-9)).fold(0f64, f64::max);
         let first = ta.iter().zip(&tb).position(|(x, y)| x.0 != y.0);
