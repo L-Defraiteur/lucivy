@@ -60,7 +60,10 @@ fn stats(index: &ShardedHandle) -> String {
     let mut out = format!("N {}", index.num_docs());
     for name in ["content", "docstring", "name"] {
         let Some(f) = handle.field(name) else { continue };
-        let tokens: u64 = (0..index.num_shards()).map(|s| index.shard(s).unwrap().reader.searcher().total_num_tokens(f).unwrap()).sum();
+        let tokens: u64 = (0..index.num_shards())
+            .flat_map(|s| index.shard(s).unwrap().reader.searcher().segment_readers().to_vec())
+            .map(|seg| seg.inverted_index(f).map(|i| i.total_num_tokens()).unwrap_or(0))
+            .sum();
         out.push_str(&format!(", tokens {name} {tokens}"));
     }
     let segments: usize = (0..index.num_shards()).map(|s| index.shard(s).unwrap().reader.searcher().segment_readers().len()).sum();
