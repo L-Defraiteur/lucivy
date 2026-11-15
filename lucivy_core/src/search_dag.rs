@@ -383,6 +383,7 @@ impl Node for BuildWeightNode {
         let mut v3_segments: Vec<ld_lucivy::SegmentReader> = Vec::new();
         let filtered = self.active.iter().any(|(_, f)| f.is_some());
         let mut allowed_docs = 0u64;
+        let mut allowed_tokens: HashMap<ld_lucivy::schema::Field, u64> = HashMap::new();
         for (shard_id, allowed) in &self.active {
             let Some(shard) = self.shards.get(*shard_id) else { continue };
             let searcher = shard.reader.searcher();
@@ -397,6 +398,9 @@ impl Node for BuildWeightNode {
                     None => seg.clone(),
                 };
                 allowed_docs += reader.num_docs() as u64;
+                if filtered {
+                    view_tokens(seg, &reader, &mut allowed_tokens)?;
+                }
                 if is_v3 { v3_segments.push(reader); }
             }
         }
@@ -448,7 +452,7 @@ impl Node for BuildWeightNode {
                 None => {
                     let mut local = AggregatedBm25StatsOwned::new(searchers);
                     if let Some(n) = subset_docs {
-                        local = local.with_subset_docs(n);
+                        local = local.with_subset(n, allowed_tokens);
                     }
                     Arc::new(local)
                 }
@@ -804,4 +808,39 @@ pub(crate) enum ShardFilter {
     /// Only these shards, unfiltered — one batch of a search that streams
     /// the shards through a memory budget (see `ShardedHandle::search_internal`).
     Subset(Vec<usize>),
+}
+
+
+/// The tokens of each indexed text field over the documents `view` keeps alive (a filtered reader of `seg`),
+/// added to `out`. Field norms keep a document's length exact up to 40 tokens and by steps past it, while the
+/// segment keeps the exact total of each field: the sum of the kept documents' norms is scaled by
+/// `exact total / sum of every document's norm`, segment by segment, so that the subset's count is exact when
+/// the view is the whole segment and close to the subset indexed alone otherwise. One pass over the segment's
+/// norms, beside the one that built the filter.
+fn view_tokens(
+    seg: &ld_lucivy::SegmentReader,
+    view: &ld_lucivy::SegmentReader,
+    out: &mut HashMap<ld_lucivy::schema::Field, u64>,
+) -> Result<(), String> {
+    let schema = seg.schema();
+    let alive = view.alive_bitset();
+    for (field, entry) in schema.fields() {
+        let ld_lucivy::schema::FieldType::Str(options) = entry.field_type() else { continue };
+        if options.get_indexing_options().is_none_or(|o| !o.fieldnorms()) {
+            continue;
+        }
+        let Ok(norms) = seg.get_fieldnorms_reader(field) else { continue };
+        let exact = seg.inverted_index(field).map_err(|e| format!("inverted index: {e}"))?.total_num_tokens();
+        let (mut every, mut kept) = (0u64, 0u64);
+        for doc in 0..seg.max_doc() {
+            let n = norms.fieldnorm(doc) as u64;
+            every += n;
+            if alive.is_none_or(|a| a.is_alive(doc)) {
+                kept += n;
+            }
+        }
+        let tokens = if every == 0 { 0 } else { (kept as u128 * exact as u128 / every as u128) as u64 };
+        *out.entry(field).or_insert(0) += tokens;
+    }
+    Ok(())
 }
