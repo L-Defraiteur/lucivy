@@ -59,21 +59,34 @@ pub struct AggregatedBm25StatsOwned {
     /// A filtered search scores as if the index were the allowed subset: its
     /// prescan only sees that subset, so `doc_freq` is counted there, and N
     /// must be the subset's size for the IDF to stay coherent (with N global
-    /// and df on ten documents, one hit went from 0.02 to 2.9). The token
-    /// count is scaled with it, so the average field length stays the
-    /// corpus's — a property of the text, not of the filter.
+    /// and df on ten documents, one hit went from 0.02 to 2.9).
     subset_docs: Option<u64>,
+    /// The token count of each field over the allowed subset (`with_subset`),
+    /// so that the average field length is the subset's too. Until 16 November
+    /// 2026 the corpus's count was scaled to N instead — « a property of the
+    /// text, not of the filter » — and documents the filter hides (the closed
+    /// versions rag3weaver keeps) moved every length normalisation. A field
+    /// missing here falls back to that scaling.
+    subset_tokens: Option<std::collections::HashMap<Field, u64>>,
 }
 
 impl AggregatedBm25StatsOwned {
     /// Create from owned searchers (one per shard).
     pub fn new(searchers: Vec<Searcher>) -> Self {
-        Self { searchers, subset_docs: None }
+        Self { searchers, subset_docs: None, subset_tokens: None }
     }
 
     /// Score as if the index held `docs` documents (a filtered search).
     pub fn with_subset_docs(mut self, docs: u64) -> Self {
         self.subset_docs = Some(docs.max(1));
+        self
+    }
+
+    /// Score as if the index held the allowed subset alone: `docs` documents,
+    /// and `tokens` tokens per field (the average field length of the subset).
+    pub fn with_subset(mut self, docs: u64, tokens: std::collections::HashMap<Field, u64>) -> Self {
+        self.subset_docs = Some(docs.max(1));
+        self.subset_tokens = Some(tokens);
         self
     }
 
@@ -88,6 +101,9 @@ impl AggregatedBm25StatsOwned {
 
 impl Bm25StatisticsProvider for AggregatedBm25StatsOwned {
     fn total_num_tokens(&self, field: Field) -> ld_lucivy::Result<u64> {
+        if let Some(tokens) = self.subset_tokens.as_ref().and_then(|t| t.get(&field)) {
+            return Ok(*tokens);
+        }
         let mut total = 0u64;
         for searcher in &self.searchers {
             total += searcher.total_num_tokens(field)?;
