@@ -147,3 +147,49 @@ fn weight_by_family() {
         }
     }
 }
+
+/// The heaviest files of the same copy, without any rebuild: per path, the documents (Scope), the text,
+/// the largest document, and the exact duplicates of content it holds (the same content in several
+/// documents, a scope that receives the lines it covers).
+///
+///     LUCIVY_FAMILY_INDEX=<copy> LUCIVY_FAMILY_MAP=<tsv> [LUCIVY_FAMILY_TOP=25] \
+///     cargo test --release -p lucivy-core --test test_weight_by_family heaviest_files -- --ignored --nocapture
+#[test]
+#[ignore]
+fn heaviest_files() {
+    use std::hash::{Hash, Hasher};
+    let source_path = std::env::var("LUCIVY_FAMILY_INDEX").expect("LUCIVY_FAMILY_INDEX");
+    let top: usize = std::env::var("LUCIVY_FAMILY_TOP").map(|v| v.parse().unwrap()).unwrap_or(25);
+    let paths: HashMap<u64, String> = std::fs::read_to_string(std::env::var("LUCIVY_FAMILY_MAP").expect("LUCIVY_FAMILY_MAP"))
+        .unwrap().lines()
+        .filter_map(|l| { let mut c = l.split('\t'); Some((c.next()?.parse().ok()?, c.next()?.to_string())) })
+        .collect();
+    let source = ShardedHandle::open(&source_path).unwrap();
+    let docs = stored_documents(&source);
+    let text: u64 = docs.iter().map(|d| d.text_bytes).sum();
+    // path → (documents, text, largest, duplicate bytes)
+    let mut by: HashMap<String, (u64, u64, u64, u64)> = HashMap::new();
+    let mut seen: HashMap<(String, u64), ()> = HashMap::new();
+    for d in &docs {
+        let path = paths.get(&d.node).cloned().unwrap_or_else(|| "(sans Scope)".into());
+        let content = d.fields.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        content.hash(&mut h);
+        let duplicate = seen.insert((path.clone(), h.finish()), ()).is_some();
+        let e = by.entry(path).or_default();
+        e.0 += 1;
+        e.1 += d.text_bytes;
+        e.2 = e.2.max(d.content_bytes);
+        if duplicate { e.3 += d.content_bytes }
+    }
+    let mut rows: Vec<(String, (u64, u64, u64, u64))> = by.into_iter().collect();
+    rows.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+    let mut running = 0u64;
+    println!("== the {top} heaviest files: path | documents | text | cumulative share | largest document | duplicates within the file");
+    for (path, (n, bytes, largest, dup)) in rows.iter().take(top) {
+        running += bytes;
+        println!("{path}\t{n}\t{}\t{:.1} %\t{}\t{}", mb(*bytes), 100.0 * running as f64 / text.max(1) as f64, mb(*largest), mb(*dup));
+    }
+    let dup_total: u64 = rows.iter().map(|r| r.1 .3).sum();
+    println!("{} files ; duplicates of content within a file: {} in all", rows.len(), mb(dup_total));
+}
