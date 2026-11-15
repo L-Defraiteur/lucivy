@@ -812,11 +812,12 @@ pub(crate) enum ShardFilter {
 
 
 /// The tokens of each indexed text field over the documents `view` keeps alive (a filtered reader of `seg`),
-/// added to `out`. Field norms keep a document's length exact up to 40 tokens and by steps past it, while the
-/// segment keeps the exact total of each field: the sum of the kept documents' norms is scaled by
-/// `exact total / sum of every document's norm`, segment by segment, so that the subset's count is exact when
-/// the view is the whole segment and close to the subset indexed alone otherwise. One pass over the segment's
-/// norms, beside the one that built the filter.
+/// added to `out`. Field norms keep a document's length exact up to 40 tokens and by steps of about an eighth
+/// past it, and a step decodes to its lower bound: each length is read as the middle of its step instead,
+/// which takes away the bias (a lower bound underestimates by 6 % on average, and not alike for short visible
+/// versions and long hidden ones). The segment keeps the exact total of each field: the kept sum is scaled by
+/// `exact total / sum of every document's estimate`, so that the subset's count is exact when the view is the
+/// whole segment. One pass over the segment's norms, beside the one that built the filter.
 fn view_tokens(
     seg: &ld_lucivy::SegmentReader,
     view: &ld_lucivy::SegmentReader,
@@ -831,15 +832,21 @@ fn view_tokens(
         }
         let Ok(norms) = seg.get_fieldnorms_reader(field) else { continue };
         let exact = seg.inverted_index(field).map_err(|e| format!("inverted index: {e}"))?.total_num_tokens();
-        let (mut every, mut kept) = (0u64, 0u64);
+        // The middle of each step, once per norm id.
+        let middle: Vec<f64> = (0..=255u16).map(|id| {
+            let low = ld_lucivy::fieldnorm::FieldNormReader::id_to_fieldnorm(id as u8) as f64;
+            let high = if id < 255 { ld_lucivy::fieldnorm::FieldNormReader::id_to_fieldnorm(id as u8 + 1) as f64 } else { low };
+            if high - low <= 1.0 { low } else { (low + high - 1.0) / 2.0 }
+        }).collect();
+        let (mut every, mut kept) = (0f64, 0f64);
         for doc in 0..seg.max_doc() {
-            let n = norms.fieldnorm(doc) as u64;
+            let n = middle[norms.fieldnorm_id(doc) as usize];
             every += n;
             if alive.is_none_or(|a| a.is_alive(doc)) {
                 kept += n;
             }
         }
-        let tokens = if every == 0 { 0 } else { (kept as u128 * exact as u128 / every as u128) as u64 };
+        let tokens = if every <= 0.0 { 0 } else { (kept * exact as f64 / every).round() as u64 };
         *out.entry(field).or_insert(0) += tokens;
     }
     Ok(())
