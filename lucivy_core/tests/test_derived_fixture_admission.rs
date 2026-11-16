@@ -5,7 +5,8 @@ mod common;
 
 use std::cell::Cell;
 use common::corpus_oracle::{self, OracleError};
-use common::derived_fixture::{with_derived_fixture, FixtureError, LoadedCorpus};
+use common::derived_fixture::{with_derived_fixture, FixtureError, LoadedCorpus, PreparedQuery};
+use lucivy_core::query::QueryConfig;
 
 fn fifty_documents_without_the_panel() -> LoadedCorpus {
     (0..50).map(|i| (format!("memory/{i}.c"), b"return 0;".to_vec())).collect()
@@ -21,10 +22,29 @@ fn missing_panel_is_rejected_before_any_builder() {
             builds.set(builds.get() + 1);
         },
     );
-    // The baseline calls the builder once. This assertion must be SEEN red
-    // before the missing coverage gate is corrected. Do not change the panel.
+    // Seen red on 81b0e74: the baseline called the builder once with no coverage.
     assert_eq!(builds.get(), 0, "an uncovered panel must be refused before the builder");
-    assert!(matches!(result, Err(FixtureError::UncoveredPanel { .. })));
+    let missing = match result {
+        Err(FixtureError::UncoveredPanel { queries }) => queries,
+        other => panic!("expected a precise uncovered-panel refusal, got {other:?}"),
+    };
+    assert!(missing.iter().any(|query| query == "strict: mutex_lock"));
+    assert!(missing.iter().any(|query| query == "relax-case: Mutex"));
+    assert!(!missing.iter().any(|query| query == "relax: return"));
+
+    // Separate positive memory fixture: prevents an unconditional rejection fix.
+    // Neither the original fifty negative documents nor the eleven queries change.
+    let text = "Mutex mutex_lock mutex lock spin_lock spin_lock_irqsave sched printk return if ( schedule register";
+    with_derived_fixture(
+        || Ok((0..50).map(|i| (format!("positive/{i}.c"), text.as_bytes().to_vec())).collect()),
+        |files, panel| {
+            assert_eq!(files.len(), 50);
+            assert_eq!(panel.len(), 11);
+            assert!(files.iter().all(|(_, content)| content == text));
+            builds.set(builds.get() + 1);
+        },
+    ).expect("a covered panel must reach the builder");
+    assert_eq!(builds.get(), 1);
 }
 
 #[test]
@@ -70,6 +90,13 @@ fn underscore_is_a_boundary_but_a_content_suffix_is_not() {
 fn regex_keeps_nonempty_original_byte_spans() {
     let regex = regex::RegexBuilder::new("a*").case_insensitive(true).build().unwrap();
     assert_eq!(corpus_oracle::regex_spans(b"Ab", &regex).unwrap(), vec![(0, 1)]);
+    // An independent invalid-pattern probe; it does not replace a declared panel query.
+    let invalid = QueryConfig {
+        query_type: "contains".into(), field: Some("content".into()), value: Some("(".into()),
+        regex: Some(true), ..Default::default()
+    };
+    assert!(matches!(PreparedQuery::new(&invalid), Err(FixtureError::Query { reason, .. })
+        if reason.contains("invalid regex pattern")));
 }
 
 #[test]
@@ -84,4 +111,11 @@ fn fuzzy_uses_the_existing_occurrence_definition_on_admitted_bytes() {
 fn oracle_decode_failure_is_distinct_from_zero_matches() {
     assert!(matches!(corpus_oracle::literal_spans(&[0xff], "mutex_lock", true), Err(OracleError::Utf8(_))));
     assert!(corpus_oracle::literal_spans(b"return 0;", "mutex_lock", true).unwrap().is_empty());
+    let config = QueryConfig {
+        query_type: "contains".into(), field: Some("content".into()), value: Some("mutex_lock".into()),
+        strict_separators: Some(true), ..Default::default()
+    };
+    let query = PreparedQuery::new(&config).unwrap();
+    assert!(matches!(query.spans("memory/invalid.c", &[0xff]), Err(FixtureError::Utf8 { .. })));
+    assert!(query.spans("memory/empty-match.c", b"return 0;").unwrap().is_empty());
 }
