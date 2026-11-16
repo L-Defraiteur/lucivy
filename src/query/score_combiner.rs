@@ -36,14 +36,19 @@ impl ScoreCombiner for DoNothingCombiner {
 }
 
 /// Sums the score of different scorers.
+///
+/// The sum is kept in f64 and rounded to a `Score` once: a handful of f32 scores add up exactly in f64, so
+/// the result does not depend on the order the scorers come in. That order is not stable — a union takes
+/// out a scorer that ran out by `swap_remove` — and an f32 sum in that order gave the same document scores
+/// an ulp apart in two indexes of the same documents written in other segments (16 November 2026).
 #[derive(Default, Clone, Copy)]
 pub struct SumCombiner {
-    score: Score,
+    score: f64,
 }
 
 impl ScoreCombiner for SumCombiner {
     fn update<TScorer: Scorer>(&mut self, scorer: &mut TScorer) {
-        self.score += scorer.score();
+        self.score += scorer.score() as f64;
     }
 
     fn clear(&mut self) {
@@ -52,16 +57,18 @@ impl ScoreCombiner for SumCombiner {
 
     #[inline]
     fn score(&self) -> Score {
-        self.score
+        self.score as Score
     }
 }
 
 /// Take max score of different scorers
 /// and optionally sum it with other matches multiplied by `tie_breaker`
+///
+/// The sum of the other matches is kept in f64, for the reason given at [`SumCombiner`].
 #[derive(Default, Clone, Copy)]
 pub struct DisjunctionMaxCombiner {
     max: Score,
-    sum: Score,
+    sum: f64,
     tie_breaker: Score,
 }
 
@@ -80,7 +87,7 @@ impl ScoreCombiner for DisjunctionMaxCombiner {
     fn update<TScorer: Scorer>(&mut self, scorer: &mut TScorer) {
         let score = scorer.score();
         self.max = Score::max(score, self.max);
-        self.sum += score;
+        self.sum += score as f64;
     }
 
     fn clear(&mut self) {
@@ -90,6 +97,6 @@ impl ScoreCombiner for DisjunctionMaxCombiner {
 
     #[inline]
     fn score(&self) -> Score {
-        self.max + (self.sum - self.max) * self.tie_breaker
+        self.max + ((self.sum - self.max as f64) as Score) * self.tie_breaker
     }
 }

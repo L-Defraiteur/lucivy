@@ -197,11 +197,12 @@ pub fn block_wand(
             continue;
         }
 
-        // At this point, all scorers are positioned on the doc.
+        // At this point, all scorers are positioned on the doc. Summed in f64, then rounded once: the
+        // scorers are sorted by doc, so their order here moves, and the result must not (see `SumCombiner`).
         let score = scorers[..pivot_len]
             .iter_mut()
-            .map(|scorer| scorer.score())
-            .sum();
+            .map(|scorer| scorer.score() as f64)
+            .sum::<f64>() as Score;
 
         if score > threshold {
             threshold = callback(pivot_doc, score);
