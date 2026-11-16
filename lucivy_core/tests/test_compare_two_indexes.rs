@@ -6,7 +6,8 @@
 //! With `LUCIVY_CMP_B_VISIBLE=1`, B is searched filtered to its documents whose content A also holds:
 //! the visible versions of an index that keeps closed ones, as rag3weaver's visibility filter would.
 //!
-//!     LUCIVY_CMP_A=<copy> LUCIVY_CMP_B=<copy> LUCIVY_CMP_QUERIES=<json [{"label", "query"}]> [LUCIVY_CMP_B_VISIBLE=1] \
+//!     LUCIVY_CMP_A=<copy> LUCIVY_CMP_B=<copy> LUCIVY_CMP_QUERIES=<json [{"label", "query"}]> \
+//!     [LUCIVY_CMP_B_IDS=<file> | LUCIVY_CMP_B_VISIBLE=1] \
 //!     cargo test --release -p lucivy-core --test test_compare_two_indexes -- --ignored --nocapture
 
 use std::collections::{BTreeMap, HashMap};
@@ -82,8 +83,13 @@ fn compare_two_indexes() {
     let only_a: u32 = a_set.iter().map(|(k, n)| n.saturating_sub(*b_set.get(k).unwrap_or(&0))).sum();
     let only_b: u32 = b_set.iter().map(|(k, n)| n.saturating_sub(*a_set.get(k).unwrap_or(&0))).sum();
     println!("stored documents: A {} B {} ; only in A {only_a}, only in B {only_b}", a_docs.len(), b_docs.len());
-    let visible: Option<std::collections::HashSet<u64>> = std::env::var("LUCIVY_CMP_B_VISIBLE").is_ok_and(|v| v == "1")
-        .then(|| b_docs.iter().filter(|(_, id)| a_set.contains_key(id)).map(|(n, _)| *n).collect());
+    // `LUCIVY_CMP_B_IDS`: B filtered by a file of `_node_id` (one per line), the set its caller passes;
+    // `LUCIVY_CMP_B_VISIBLE=1`: an approximation, B's documents whose content A also holds.
+    let visible: Option<std::collections::HashSet<u64>> = match std::env::var("LUCIVY_CMP_B_IDS") {
+        Ok(file) => Some(std::fs::read_to_string(file).unwrap().lines().filter_map(|l| l.trim().parse().ok()).collect()),
+        Err(_) => std::env::var("LUCIVY_CMP_B_VISIBLE").is_ok_and(|v| v == "1")
+            .then(|| b_docs.iter().filter(|(_, id)| a_set.contains_key(id)).map(|(n, _)| *n).collect()),
+    };
     if let Some(v) = &visible { println!("B searched filtered to {} documents whose content A holds", v.len()) }
     for entry in &queries {
         let label = entry["label"].as_str().unwrap();
