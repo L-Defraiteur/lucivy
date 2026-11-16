@@ -12,9 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lucivy_core::handle::{LucivyHandle, NODE_ID_FIELD};
-use lucivy_core::query::{self, QueryConfig, SchemaConfig};
-
-const RX: u8 = 255;
+use lucivy_core::query::{self, SchemaConfig};
+use common::derived_fixture::{with_derived_fixture, PanelQuery};
 
 fn corpus(max: usize) -> Vec<(String, String)> {
     let root = Path::new("/tmp/lucivy-cmp");
@@ -93,39 +92,9 @@ fn build(files: &[(String, String)], sfx_version: u8, derived_in_ram: bool, dir:
     handle
 }
 
-#[derive(Clone, Copy)]
-struct Q { text: &'static str, strict: bool, distance: u8, anchor: bool, exact: bool, label: &'static str }
-
-fn panel() -> Vec<Q> {
-    vec![
-        Q { text: "mutex_lock", strict: true, distance: 0, anchor: false, exact: false, label: "strict" },
-        Q { text: "mutex lock", strict: false, distance: 0, anchor: false, exact: false, label: "relax" },
-        Q { text: "spin_lock", strict: true, distance: 0, anchor: false, exact: false, label: "strict" },
-        Q { text: "sched", strict: true, distance: 0, anchor: true, exact: true, label: "term" },
-        Q { text: "printk", strict: true, distance: 0, anchor: true, exact: false, label: "sw" },
-        Q { text: "return", strict: false, distance: 0, anchor: false, exact: false, label: "relax" },
-        Q { text: "if (", strict: true, distance: 0, anchor: false, exact: false, label: "strict" },
-        Q { text: "schdule", strict: false, distance: 1, anchor: false, exact: false, label: "fz1" },
-        Q { text: "regsiter", strict: false, distance: 2, anchor: false, exact: false, label: "fz2" },
-        Q { text: "spin_lock_[a-z]+", strict: true, distance: RX, anchor: false, exact: false, label: "rx" },
-        Q { text: "Mutex", strict: false, distance: 0, anchor: false, exact: false, label: "relax-case" },
-    ]
-}
-
-fn run(handle: &LucivyHandle, q: Q) -> (HashSet<u64>, HashSet<(u64, usize, usize)>) {
+fn run(handle: &LucivyHandle, q: &PanelQuery) -> (HashSet<u64>, HashSet<(u64, usize, usize)>) {
     let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
-    let cfg = QueryConfig {
-        query_type: "contains".into(),
-        field: Some("content".into()),
-        value: Some(q.text.into()),
-        strict_separators: Some(q.strict),
-        distance: if q.distance > 0 && q.distance != RX { Some(q.distance) } else { None },
-        regex: if q.distance == RX { Some(true) } else { None },
-        anchor_start: if q.anchor { Some(true) } else { None },
-        exact_match: if q.exact { Some(true) } else { None },
-        ..Default::default()
-    };
-    let query = query::build_query(&cfg, &handle.schema, &handle.index, Some(Arc::clone(&sink))).unwrap();
+    let query = query::build_query(&q.config, &handle.schema, &handle.index, Some(Arc::clone(&sink))).unwrap();
     let searcher = handle.reader.searcher();
     let collector = ld_lucivy::collector::TopDocs::with_limit(100_000).order_by_score();
     let results = searcher.search(&*query, &collector).unwrap();
@@ -163,53 +132,58 @@ fn derived_on_disk(names: &[String]) -> usize {
     names.iter().filter(|n| n.ends_with(".posmap") || n.ends_with(".word_pos_map") || n.ends_with(".sibling_v3")).count()
 }
 
-fn compare(reference: &LucivyHandle, candidate: &LucivyHandle, what: &str) {
-    for q in panel() {
+fn compare(reference: &LucivyHandle, candidate: &LucivyHandle, what: &str, panel: &[PanelQuery]) {
+    for q in panel {
+        let text = q.config.value.as_deref().unwrap();
         let (d0, s0) = run(reference, q);
         let (d1, s1) = run(candidate, q);
-        assert!(!d0.is_empty(), "{} {}: the panel must find something", q.text, q.label);
-        assert_eq!(d0, d1, "{what}: {} {}: documents differ ({} / {})", q.text, q.label, d0.len(), d1.len());
-        assert_eq!(s0, s1, "{what}: {} {}: spans differ ({} / {})", q.text, q.label, s0.len(), s1.len());
-        eprintln!("{what:<22} {:<20} {:<10} {:>5} docs {:>6} spans — identical", q.text, q.label, d0.len(), s0.len());
+        assert!(!d0.is_empty(), "{} {}: the panel must find something", text, q.label);
+        assert_eq!(d0, d1, "{what}: {} {}: documents differ ({} / {})", text, q.label, d0.len(), d1.len());
+        assert_eq!(s0, s1, "{what}: {} {}: spans differ ({} / {})", text, q.label, s0.len(), s1.len());
+        eprintln!("{what:<22} {:<20} {:<10} {:>5} docs {:>6} spans — identical", text, q.label, d0.len(), s0.len());
     }
 }
 
 #[test]
 fn derived_in_ram_answers_like_the_files() {
-    let files = corpus(300);
-    eprintln!("corpus: {} files", files.len());
-    let scratch = common::scratch("lucivy-derived");
-    let base: PathBuf = scratch.path().to_path_buf();
-    let h3 = build(&files, 3, false, &base.join("v3"));
-    let h3r = build(&files, 3, true, &base.join("v3-ram"));
-    let h4r = build(&files, 4, true, &base.join("v4-ram"));
+    with_derived_fixture(
+        || Ok(corpus(300).into_iter().map(|(source, text)| (source, text.into_bytes())).collect()),
+        |files, panel| {
+            eprintln!("corpus: {} files", files.len());
+            let scratch = common::scratch("lucivy-derived");
+            let base: PathBuf = scratch.path().to_path_buf();
+            let h3 = build(files, 3, false, &base.join("v3"));
+            let h3r = build(files, 3, true, &base.join("v3-ram"));
+            let h4r = build(files, 4, true, &base.join("v4-ram"));
 
-    let (b3, n3) = files_of(&base.join("v3"));
-    let (b3r, n3r) = files_of(&base.join("v3-ram"));
-    let (b4r, n4r) = files_of(&base.join("v4-ram"));
-    assert!(derived_on_disk(&n3) > 0, "a plain index writes the derived sidecars");
-    assert_eq!(derived_on_disk(&n3r), 0, "derived_in_ram writes none of the three: {n3r:?}");
-    assert_eq!(derived_on_disk(&n4r), 0, "derived_in_ram with the dictionary writes none either: {n4r:?}");
-    assert!(b3r < b3, "smaller on disk: {b3r} against {b3}");
-    eprintln!("size: v3 {b3} B, v3 derived_in_ram {b3r} B ({:+.1} %), dictionary + derived_in_ram {b4r} B",
-        100.0 * (b3r as f64 - b3 as f64) / b3 as f64);
-    let meta: String = std::fs::read_to_string(base.join("v3-ram").join("meta.json")).unwrap()
-        .chars().filter(|c| !c.is_whitespace()).collect();
-    assert!(meta.contains("\"derived_in_ram\":true"), "meta.json carries the setting: {meta}");
-    let meta = std::fs::read_to_string(base.join("v3").join("meta.json")).unwrap();
-    assert!(!meta.contains("derived_in_ram"), "an index without the option does not name it: {meta}");
+            let (b3, n3) = files_of(&base.join("v3"));
+            let (b3r, n3r) = files_of(&base.join("v3-ram"));
+            let (b4r, n4r) = files_of(&base.join("v4-ram"));
+            assert!(derived_on_disk(&n3) > 0, "a plain index writes the derived sidecars");
+            assert_eq!(derived_on_disk(&n3r), 0, "derived_in_ram writes none of the three: {n3r:?}");
+            assert_eq!(derived_on_disk(&n4r), 0, "derived_in_ram with the dictionary writes none either: {n4r:?}");
+            assert!(b3r < b3, "smaller on disk: {b3r} against {b3}");
+            eprintln!("size: v3 {b3} B, v3 derived_in_ram {b3r} B ({:+.1} %), dictionary + derived_in_ram {b4r} B",
+                100.0 * (b3r as f64 - b3 as f64) / b3 as f64);
+            let meta: String = std::fs::read_to_string(base.join("v3-ram").join("meta.json")).unwrap()
+                .chars().filter(|c| !c.is_whitespace()).collect();
+            assert!(meta.contains("\"derived_in_ram\":true"), "meta.json carries the setting: {meta}");
+            let meta = std::fs::read_to_string(base.join("v3").join("meta.json")).unwrap();
+            assert!(!meta.contains("derived_in_ram"), "an index without the option does not name it: {meta}");
 
-    compare(&h3, &h3r, "v3 derived_in_ram");
-    compare(&h3, &h4r, "dictionary + in RAM");
+            compare(&h3, &h3r, "v3 derived_in_ram", panel);
+            compare(&h3, &h4r, "dictionary + in RAM", panel);
 
-    // Reopen from disk: the setting is read back, the sidecars rebuilt again.
-    h3r.close().unwrap();
-    h4r.close().unwrap();
-    let r3 = LucivyHandle::open(ld_lucivy::directory::MmapDirectory::open(base.join("v3-ram")).unwrap()).unwrap();
-    let r4 = LucivyHandle::open(ld_lucivy::directory::MmapDirectory::open(base.join("v4-ram")).unwrap()).unwrap();
-    compare(&h3, &r3, "v3 in RAM, reopened");
-    compare(&h3, &r4, "dictionary, reopened");
-    h3.close().unwrap();
-    r3.close().unwrap();
-    r4.close().unwrap();
+            // Reopen from disk: the setting is read back, the sidecars rebuilt again.
+            h3r.close().unwrap();
+            h4r.close().unwrap();
+            let r3 = LucivyHandle::open(ld_lucivy::directory::MmapDirectory::open(base.join("v3-ram")).unwrap()).unwrap();
+            let r4 = LucivyHandle::open(ld_lucivy::directory::MmapDirectory::open(base.join("v4-ram")).unwrap()).unwrap();
+            compare(&h3, &r3, "v3 in RAM, reopened", panel);
+            compare(&h3, &r4, "dictionary, reopened", panel);
+            h3.close().unwrap();
+            r3.close().unwrap();
+            r4.close().unwrap();
+        },
+    ).expect("derived fixture admission");
 }

@@ -12,6 +12,7 @@
 //! Output: v3_ground_truth_report.txt under `common::report_path` (the target's tmp dir)
 
 mod common;
+use common::corpus_oracle::{self, is_content_char, strip_seps};
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -80,15 +81,6 @@ fn ground_truth_report() -> String {
 }
 
 // ─── Content char (mirrors tokenizer::equal_chunk::is_content_char) ──────
-
-fn is_content_char(c: char) -> bool {
-    !c.is_ascii() || c.is_ascii_alphanumeric()
-}
-
-/// Strip non-content chars from a string (for sep-agnostic matching).
-fn strip_seps(s: &str) -> String {
-    s.chars().filter(|c| is_content_char(*c)).collect()
-}
 
 // ─── File collection ──────────────────────────────────────────────────────
 
@@ -425,43 +417,16 @@ fn grep_spans(files: &[(String, String)], needle: &str, strict: bool) -> GrepSpa
     let root = std::path::Path::new(&root);
     let mut docs = HashSet::new();
     let mut spans = HashSet::new();
-
-    // Unicode lowercase, like the engine (`DÉJÀ` matches `déjà`); separators
-    // stripped in relaxed mode. Each byte of the folded text remembers the
-    // source offset and length of the char it came from, so spans are
-    // reported on the original bytes even where folding changes the length.
-    let fold = |text: &str, strip: bool| -> (Vec<u8>, Vec<(usize, usize)>) {
-        let mut out = Vec::with_capacity(text.len());
-        let mut back = Vec::with_capacity(text.len());
-        for (off, ch) in text.char_indices() {
-            if strip && !is_content_char(ch) { continue; }
-            let n = ch.len_utf8();
-            for lc in ch.to_lowercase() {
-                let mut buf = [0u8; 4];
-                for b in lc.encode_utf8(&mut buf).bytes() {
-                    out.push(b);
-                    back.push((off, n));
-                }
-            }
-        }
-        (out, back)
-    };
-    let (needle_l, _) = fold(needle, !strict);
-    if needle_l.is_empty() { return GrepSpans { docs, spans }; }
-
+    let folded = if strict { needle.to_lowercase() } else { strip_seps(&needle.to_lowercase()) };
+    if folded.is_empty() { return GrepSpans { docs, spans }; }
+    // Preserve this historical I/O wrapper; it is NOT the fixture admission API.
     for (i, (rel, _)) in files.iter().enumerate() {
         let Ok(bytes) = std::fs::read(root.join(rel)) else { continue };
         let text = String::from_utf8_lossy(&bytes);
-        let (hay, back) = fold(&text, !strict);
-        let mut hit = false;
-        for start in find_all(&hay, &needle_l) {
-            let end_idx = start + needle_l.len() - 1;
-            let from = back[start].0;
-            let (last, n) = back[end_idx];
-            spans.insert((i, from, last + n));
-            hit = true;
+        for (from, to) in corpus_oracle::literal_spans(text.as_bytes(), needle, strict).expect("lossy UTF-8 is valid") {
+            docs.insert(i);
+            spans.insert((i, from, to));
         }
-        if hit { docs.insert(i); }
     }
     GrepSpans { docs, spans }
 }
@@ -475,33 +440,15 @@ fn grep_spans_fuzzy(files: &[(String, String)], needle: &str, distance: u8) -> G
     let root = std::path::Path::new(&root);
     let mut docs = HashSet::new();
     let mut spans = HashSet::new();
-    let needle_l: Vec<u8> = strip_seps(&needle.to_lowercase()).into_bytes();
-    if needle_l.is_empty() { return GrepSpans { docs, spans }; }
-
+    if strip_seps(&needle.to_lowercase()).is_empty() { return GrepSpans { docs, spans }; }
+    // Preserve this historical I/O wrapper; it is NOT the fixture admission API.
     for (i, (rel, _)) in files.iter().enumerate() {
         let Ok(bytes) = std::fs::read(root.join(rel)) else { continue };
         let text = String::from_utf8_lossy(&bytes);
-        let mut stripped: Vec<u8> = Vec::with_capacity(bytes.len());
-        let mut back: Vec<usize> = Vec::with_capacity(bytes.len());
-        for (off, ch) in text.char_indices() {
-            if !is_content_char(ch) { continue; }
-            for lc in ch.to_lowercase() {
-                let mut buf = [0u8; 4];
-                for b in lc.encode_utf8(&mut buf).bytes() {
-                    stripped.push(b);
-                    back.push(off);
-                }
-            }
-        }
-        let mut hit = false;
-        for (s, e, _) in ld_lucivy::suffix_fst::briques::fuzzy_spans::fuzzy_spans(&needle_l, &stripped, distance as usize) {
-            let from = back[s];
-            let last = back[e - 1];
-            let to = last + text[last..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        for (from, to) in corpus_oracle::fuzzy_spans(text.as_bytes(), needle, distance).expect("lossy UTF-8 is valid") {
+            docs.insert(i);
             spans.insert((i, from, to));
-            hit = true;
         }
-        if hit { docs.insert(i); }
     }
     GrepSpans { docs, spans }
 }
@@ -554,41 +501,18 @@ fn grep_spans_regex(files: &[(String, String)], pattern: &str) -> GrepSpans {
     let root = std::path::Path::new(&root);
     let mut docs = HashSet::new();
     let mut spans = HashSet::new();
-    let re = regex::RegexBuilder::new(pattern).case_insensitive(true).build()
+    let regex = regex::RegexBuilder::new(pattern).case_insensitive(true).build()
         .expect("invalid regex pattern");
+    // Preserve this historical I/O wrapper; it is NOT the fixture admission API.
     for (i, (rel, _)) in files.iter().enumerate() {
         let Ok(bytes) = std::fs::read(root.join(rel)) else { continue };
         let text = String::from_utf8_lossy(&bytes);
-        let mut hit = false;
-        for m in re.find_iter(&text) {
-            if m.start() == m.end() { continue; }
-            spans.insert((i, m.start(), m.end()));
-            hit = true;
+        for (from, to) in corpus_oracle::regex_spans(text.as_bytes(), &regex).expect("lossy UTF-8 is valid") {
+            docs.insert(i);
+            spans.insert((i, from, to));
         }
-        if hit { docs.insert(i); }
     }
     GrepSpans { docs, spans }
-}
-
-/// All start offsets of `needle` in `hay`, overlapping included.
-fn find_all(hay: &[u8], needle: &[u8]) -> Vec<usize> {
-    let mut out = Vec::new();
-    if needle.is_empty() || hay.len() < needle.len() { return out; }
-    let first = needle[0];
-    let mut i = 0;
-    while i + needle.len() <= hay.len() {
-        match hay[i..].iter().position(|&b| b == first) {
-            None => break,
-            Some(p) => {
-                let s = i + p;
-                if s + needle.len() <= hay.len() && &hay[s..s + needle.len()] == needle {
-                    out.push(s);
-                }
-                i = s + 1;
-            }
-        }
-    }
-    out
 }
 
 fn grep_docs_strict(files: &[(String, String)], needle: &str) -> HashSet<usize> {

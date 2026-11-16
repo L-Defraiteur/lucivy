@@ -11,6 +11,9 @@
 //! for the CI jobs that do not carry the corpus.
 #![allow(dead_code)]
 
+pub mod corpus_oracle;
+pub mod derived_fixture;
+
 pub const ABSENT_OK: &str = "LUCIVY_CORPUS_ABSENT_OK";
 
 pub fn absent_ok() -> bool {
