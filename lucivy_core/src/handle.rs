@@ -549,6 +549,12 @@ impl LucivyHandle {
     }
 }
 
+/// Return warnings for schema options that the implementation cannot honor.
+/// The red-test scaffold deliberately has no warning implementation yet.
+pub fn schema_warnings(_config: &SchemaConfig) -> Vec<String> {
+    Vec::new()
+}
+
 pub fn build_schema(
     config: &SchemaConfig,
 ) -> Result<(Schema, Vec<(String, Field)>), String> {
