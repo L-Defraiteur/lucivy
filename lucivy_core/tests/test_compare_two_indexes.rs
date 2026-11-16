@@ -6,8 +6,14 @@
 //! With `LUCIVY_CMP_B_VISIBLE=1`, B is searched filtered to its documents whose content A also holds:
 //! the visible versions of an index that keeps closed ones, as rag3weaver's visibility filter would.
 //!
+//! With `LUCIVY_CMP_DETAIL=1`, each query whose top 10 differs prints the top 20 of both sides, each document
+//! marked `both` or `only-A` / `only-B` (its content is nowhere the other side searches): a rank change from a
+//! missing document is told from a scoring one, and a permutation between equal scores from both. With
+//! `LUCIVY_CMP_ONLY_OUT=<prefix>`, the `_node_id` of those one-sided documents go to `<prefix>-only-A.txt` and
+//! `<prefix>-only-B.txt`, to be looked up in each base.
+//!
 //!     LUCIVY_CMP_A=<copy> LUCIVY_CMP_B=<copy> LUCIVY_CMP_QUERIES=<json [{"label", "query"}]> \
-//!     [LUCIVY_CMP_B_IDS=<file> | LUCIVY_CMP_B_VISIBLE=1] \
+//!     [LUCIVY_CMP_B_IDS=<file> | LUCIVY_CMP_B_VISIBLE=1] [LUCIVY_CMP_DETAIL=1] [LUCIVY_CMP_ONLY_OUT=<prefix>] \
 //!     cargo test --release -p lucivy-core --test test_compare_two_indexes -- --ignored --nocapture
 
 use std::collections::{BTreeMap, HashMap};
@@ -91,6 +97,30 @@ fn compare_two_indexes() {
             .then(|| b_docs.iter().filter(|(_, id)| a_set.contains_key(id)).map(|(n, _)| *n).collect()),
     };
     if let Some(v) = &visible { println!("B searched filtered to {} documents whose content A holds", v.len()) }
+    // `LUCIVY_CMP_DETAIL=1`: for each query whose top 10 differs, the top 20 of both sides, each document
+    // marked by whether the other side can return it at all (`both`) or holds its content nowhere it is
+    // searched (`only-A` / `only-B`), so a rank change from a missing document is told from a scoring one.
+    let detail = std::env::var("LUCIVY_CMP_DETAIL").is_ok_and(|v| v == "1");
+    let b_searched: std::collections::HashSet<u64> = match &visible {
+        Some(v) => b_docs.iter().filter(|(n, _)| v.contains(n)).map(|(_, id)| *id).collect(),
+        None => b_docs.values().copied().collect(),
+    };
+    let a_searched: std::collections::HashSet<u64> = a_docs.values().copied().collect();
+    if detail {
+        let only_a = a_searched.iter().filter(|id| !b_searched.contains(id)).count();
+        let only_b = b_searched.iter().filter(|id| !a_searched.contains(id)).count();
+        println!("searched contents: A {} distinct, B {} distinct ; only in A {only_a}, only in B {only_b}", a_searched.len(), b_searched.len());
+        // `LUCIVY_CMP_ONLY_OUT=<prefix>`: the `_node_id` of the searched documents whose content the other side
+        // never searches, one per line, in `<prefix>-only-A.txt` (ids of A) and `<prefix>-only-B.txt` (ids of B).
+        if let Ok(prefix) = std::env::var("LUCIVY_CMP_ONLY_OUT") {
+            let mut oa: Vec<u64> = a_docs.iter().filter(|(_, id)| !b_searched.contains(id)).map(|(n, _)| *n).collect();
+            let mut ob: Vec<u64> = b_docs.iter().filter(|(n, id)| visible.as_ref().is_none_or(|v| v.contains(n)) && !a_searched.contains(id)).map(|(n, _)| *n).collect();
+            oa.sort_unstable(); ob.sort_unstable();
+            std::fs::write(format!("{prefix}-only-A.txt"), oa.iter().map(|n| format!("{n}\n")).collect::<String>()).unwrap();
+            std::fs::write(format!("{prefix}-only-B.txt"), ob.iter().map(|n| format!("{n}\n")).collect::<String>()).unwrap();
+            println!("only-side ids written: {} of A, {} of B", oa.len(), ob.len());
+        }
+    }
     for entry in &queries {
         let label = entry["label"].as_str().unwrap();
         let q: QueryConfig = serde_json::from_value(entry["query"].clone()).unwrap();
@@ -106,5 +136,18 @@ fn compare_two_indexes() {
             if same_ids { "SAME" } else { "DIFF" }, ta.len(), tb.len(), first,
             ta.iter().take(3).map(|x| format!("{:x}:{:.3}", x.0 >> 40, x.1)).collect::<Vec<_>>(),
             tb.iter().take(3).map(|x| format!("{:x}:{:.3}", x.0 >> 40, x.1)).collect::<Vec<_>>());
+        if detail && !same_ids {
+            let run = |index: &ShardedHandle, docs: &HashMap<u64, u64>, filter: Option<&std::collections::HashSet<u64>>| -> Vec<(u64, f32)> {
+                let r = match filter { Some(f) => index.search_filtered(&q, 20, None, f.clone()).unwrap(), None => index.search(&q, 20, None).unwrap() };
+                index.node_ids_of(&r).unwrap().into_iter().zip(r.iter().map(|x| x.score)).map(|(n, s)| (*docs.get(&n).unwrap_or(&0), s)).collect()
+            };
+            let (da, db) = (run(&a, &a_docs, None), run(&b, &b_docs, visible.as_ref()));
+            let mark = |id: u64, other: &std::collections::HashSet<u64>, side: &str| if other.contains(&id) { "both".to_string() } else { format!("only-{side}") };
+            for i in 0..da.len().max(db.len()) {
+                let ca = da.get(i).map(|x| format!("{:x}:{:.4}:{}", x.0 >> 40, x.1, mark(x.0, &b_searched, "A"))).unwrap_or_default();
+                let cb = db.get(i).map(|x| format!("{:x}:{:.4}:{}", x.0 >> 40, x.1, mark(x.0, &a_searched, "B"))).unwrap_or_default();
+                println!("  {label}\t#{}\tA {ca}\tB {cb}", i + 1);
+            }
+        }
     }
 }
