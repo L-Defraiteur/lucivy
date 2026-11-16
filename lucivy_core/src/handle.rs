@@ -549,16 +549,25 @@ impl LucivyHandle {
     }
 }
 
-/// Return warnings for schema options that the implementation cannot honor.
-/// The red-test scaffold deliberately has no warning implementation yet.
-pub fn schema_warnings(_config: &SchemaConfig) -> Vec<String> {
-    Vec::new()
+/// Report unsupported schema options without validating or modifying them.
+/// Text and string fields remain indexed when `indexed` is explicitly false.
+/// Returns one warning per affected field, in declaration order; performs no I/O.
+pub fn schema_warnings(config: &SchemaConfig) -> Vec<String> {
+    config.fields.iter()
+        .filter(|field| matches!(field.field_type.as_str(), "text" | "string") && field.indexed == Some(false))
+        .map(|field| format!(
+            "field {:?}: indexed=false is not supported for text and string fields; the field is indexed",
+            field.name))
+        .collect()
 }
 
 pub fn build_schema(
     config: &SchemaConfig,
 ) -> Result<(Schema, Vec<(String, Field)>), String> {
     config.validate()?;
+    for warning in schema_warnings(config) {
+        eprintln!("Warning: {warning}");
+    }
 
     let mut builder = Schema::builder();
     let mut field_map = Vec::new();

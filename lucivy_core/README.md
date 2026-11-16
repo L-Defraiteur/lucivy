@@ -78,6 +78,19 @@ index.close()?;
 # Ok::<(), String>(())
 ```
 
+## Field indexing options
+
+`indexed` controls indexing for numeric fields (`u64`, `i64`, `f64`), where it
+is false by default. Fields of type `text` or `string` are always indexed:
+`indexed: false` is ignored for these types. `stored` is a separate option.
+
+Schema construction prints one warning per affected field on stderr, in field
+order. A sharded index constructs several schemas, so the warning may repeat
+for each shard. Applications can inspect the same warnings without creating
+an index or producing output through
+`lucivy_core::handle::schema_warnings(&config) -> Vec<String>`.
+This function reports ignored options; it does not validate or change the schema.
+
 ## Queries
 
 One `QueryConfig` (also deserialised from JSON) covers every query type:
