@@ -1,3 +1,26 @@
+Lucivy 4.3.9 — 16 November 2026
+================================
+
+One fix; the index format is unchanged.
+
+- **Fixed: a filtered search kept the corpus's average field length.** Since
+  4.3.7 a search restricted to `allowed_ids` scores with N and the document
+  frequencies of the allowed subset (`with_subset_docs`), but the token count
+  was the corpus's scaled to N: the average field length stayed the whole
+  index's. With documents the filter hides — the closed versions rag3weaver
+  keeps — the length normalisation of BM25 moved for every hit (on the code
+  index of a repository, 31.6 M tokens of history against 9.4 M visible: 11 of
+  15 queries ranked differently from an index of the visible documents alone,
+  scores up to 69 % off). The tokens of each field are now summed over the
+  admitted documents while their filter is built
+  (`AggregatedBm25StatsOwned::with_subset`, `search_dag::view_tokens`), each
+  length read at the middle of its field-norm step and the sum corrected by
+  the segment's exact total. Ranks now match the subset indexed alone; scores
+  within 2e-3 (the subset indexed alone counts its tokens exactly, the view
+  estimates them from field norms). Unfiltered searches are unchanged.
+- Ignored measurement test: `test_compare_two_indexes`, two indexes that
+  should hold the same documents compared by stored content.
+
 Lucivy 4.3.8 — 15 November 2026
 ================================
 

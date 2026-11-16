@@ -1,8 +1,14 @@
-# lucivy 4.3.8
+# lucivy 4.3.9
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. From Python. Runs in your process, in your transaction (bring your own storage), and the same engine runs in the browser. Powered by Rust, MIT.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
+
+### What's new in 4.3.9
+
+A patch release with one fix. The index format is unchanged.
+
+- **Filtered searches use the average length of the documents they admit.** A search restricted to a set of document ids already counted the number of documents and the word frequencies in that set (4.3.7), but it kept the average field length of the whole index. When the index holds documents the filter hides (older versions of the same content, much longer), every length normalisation moved and ranks changed: on the code index of a repository, 11 of 15 queries ranked differently from an index of the visible documents alone, scores up to 69 % off. The average length is now the admitted documents', and ranks match.
 
 ### What's new in 4.3.8
 
@@ -151,7 +157,7 @@ Where a cell says "not with this analyzer", a purpose-built analyzer or plugin m
 ## Install
 
 ```bash
-pip install lucivy  # 4.3.8
+pip install lucivy  # 4.3.9
 ```
 
 ## Quick start
