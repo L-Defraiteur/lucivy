@@ -142,12 +142,15 @@ fn maintain_gives_back_the_dictionary_of_deleted_documents() {
     let margin = (dead as f64 - live as f64).abs() / live as f64;
     eprintln!("dictionary bytes: all 400 {full}, purged {dead}, fresh {live} (margin {:.2} %)", margin * 100.0);
     assert!(dead < full, "[check: the-dictionary-shrinks]");
-    // The texts are the fresh index's exactly (checked above); the bytes
-    // differ by the ids' table of the `.termtexts`, which names the kept ids
-    // by runs: no id is renumbered, so deleting every other document leaves
-    // the most runs there can be. Measured on 14 November 2026: .sfx 50 577
-    // against 50 888, .termtexts 11 862 against 10 174, 2.25 % in all.
-    assert!(margin <= 0.05, "[check: the-dictionary-of-a-fresh-index] {dead} vs {live}");
+    // The texts are the fresh index's exactly (checked above). The bytes differ by the table of ids of the
+    // `.termtexts`, which names the kept ids by runs of 8 bytes (`ids_section`: a u32 start and a u32
+    // length): no id is renumbered, so the kept ids can be cut into as many runs as there are texts, the
+    // order the writer threads minted them in deciding how many. A margin in percent did not hold: 2.25 %
+    // and 3.65 % on luciepc, 6.2 % on a four-core CI runner (16 November 2026, 64 048 against 60 290). The
+    // bound is the structure's: the fresh index, 2 % for the FST, plus one run per kept text.
+    let kept_texts = report.dictionary_texts.1;
+    let bound = live as f64 * 1.02 + 8.0 * kept_texts as f64;
+    assert!((dead as f64) <= bound, "[check: the-dictionary-of-a-fresh-index] {dead} vs {live} (bound {bound:.0}, {kept_texts} texts)");
 
     // Same hits and scores as before the purge, minus the orphans; and as the fresh index.
     for (word, was) in ["shared", "uniq2x", "tail4", "words here"].iter().zip(before) {
