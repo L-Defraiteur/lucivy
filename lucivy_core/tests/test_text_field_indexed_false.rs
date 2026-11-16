@@ -17,7 +17,7 @@ fn unsupported_text_indexing_options_are_reported_once_per_field() {
         ]
     })).unwrap();
     assert_eq!(schema_warnings(&config), vec![
-        "field \"body\": indexed=false is not supported for text and string fields; the field is indexed",
-        "field \"label\": indexed=false is not supported for text and string fields; the field is indexed",
+        r#"field "body": indexed=false is not supported for text and string fields; the field is indexed"#,
+        r#"field "label": indexed=false is not supported for text and string fields; the field is indexed"#,
     ]);
 }
