@@ -90,6 +90,9 @@ pub struct FieldDef {
     #[serde(rename = "type")]
     pub field_type: String,
     pub stored: Option<bool>,
+    /// Controls numeric field indexing (default false). Text and string fields
+    /// are always indexed: explicit false is ignored and reported by
+    /// `crate::handle::schema_warnings` when the schema is built.
     pub indexed: Option<bool>,
     pub fast: Option<bool>,
 }
