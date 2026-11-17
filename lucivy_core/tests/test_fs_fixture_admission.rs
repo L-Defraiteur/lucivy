@@ -115,6 +115,9 @@ fn uncovered_panel_is_refused_before_zero_equals_zero() {
 
 #[test]
 fn covered_fixture_reaches_builder_once_on_the_captured_bytes() {
+    // Independent known values also pin lowercase hex and leading zeroes.
+    assert_eq!(sha256(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    assert_eq!(sha256(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     let dir = fixture();
     let path = dir.path().join("covered.txt");
     std::fs::write(&path, COVERED).unwrap();

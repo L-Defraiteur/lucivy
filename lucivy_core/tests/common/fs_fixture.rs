@@ -85,7 +85,9 @@ impl Snapshot {
     pub fn files(&self) -> &[(String, String)] { &self.files }
     pub fn pins(&self) -> &[DocumentPin] { &self.pins }
 }
-pub fn sha256(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
+pub fn sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+}
 
 /// Prepared transport, deliberately NOT emitted as ADMITTED by the red baseline.
 /// No I/O at construction. Parent must already exist; never truncates a receipt.
