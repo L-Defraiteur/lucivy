@@ -122,8 +122,8 @@ pub fn sha256(bytes: &[u8]) -> String {
 /// Construction has no I/O. Parent must already exist, outside the input root.
 pub struct ManifestSink {
     pub path: PathBuf,
-    // Declared by the real consumer, deliberately NOT validated in this RED
-    // extraction. The output witnesses must expose the existing omissions.
+    // All consumer outputs are declared before capture. None may alias the
+    // input, another output, or an existing file.
     pub report_paths: Vec<PathBuf>,
     pub trace: Trace,
 }
@@ -133,10 +133,10 @@ impl ManifestSink {
         self.trace.record(Event::Manifest(self.path.clone()));
         Ok(out)
     }
-    fn publish(&self, mut out: std::fs::File, plan: &CapturePlan, snapshot: &Snapshot,
-               refusal: Option<&Refusal>) -> io::Result<String> {
+    fn publish(&self, mut out: std::fs::File, plan: &CapturePlan, paths: &InvocationPaths,
+               snapshot: &Snapshot, refusal: Option<&Refusal>) -> io::Result<String> {
         let body = serde_json::to_vec(&serde_json::json!({
-            "schema": 1, "plan": plan, "documents": snapshot.pins(), "panel": PANEL,
+            "schema": 1, "plan": plan, "paths": paths, "documents": snapshot.pins(), "panel": PANEL,
             "verdict": if refusal.is_some() { "REFUSED" } else { "ADMITTED" },
             "refusal": refusal,
         }))?;
@@ -151,28 +151,105 @@ impl ManifestSink {
     }
 }
 
-/// Exact report-effect seam used by the native correctness callback. RED:
-/// preserves build-before-report and File::create truncation until witnessed.
-pub fn with_v3_report<H, R>(path: &Path, trace: &Trace,
+/// Validated namespace shared by admission and the real consumer. Paths are
+/// resolved once, including aliases in parents, before any output is reserved.
+/// Private fields prevent the callback from substituting an undeclared output.
+#[derive(Debug, Serialize)]
+pub struct InvocationPaths {
+    input_root: PathBuf,
+    manifest: PathBuf,
+    reports: Vec<PathBuf>,
+}
+impl InvocationPaths {
+    pub fn manifest_path(&self) -> &Path { &self.manifest }
+    pub fn report_path(&self, index: usize) -> Option<&Path> {
+        self.reports.get(index).map(PathBuf::as_path)
+    }
+
+    fn prepare(plan: &CapturePlan, sink: &ManifestSink) -> Result<Self, Refusal> {
+        let invalid = |reason: String| Refusal::Plan { reason };
+        let root = absolute(&plan.root).map_err(|e| io_refusal("resolve", &plan.root, e))?;
+        // Resolve the longest existing input prefix. An absent input remains an
+        // absent input for CaptureFs, while its parents still have an identity.
+        let mut prefix = root.clone();
+        let mut missing = Vec::new();
+        let mut input_root = loop {
+            match std::fs::canonicalize(&prefix) {
+                Ok(path) => break path,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    missing.push(prefix.file_name().ok_or_else(|| invalid("unresolvable input root".into()))?.to_os_string());
+                    if !prefix.pop() { return Err(invalid("unresolvable input root".into())); }
+                }
+                Err(e) => return Err(io_refusal("resolve", &root, e)),
+            }
+        };
+        for component in missing.into_iter().rev() { input_root.push(component); }
+        if input_root.to_str().is_none() {
+            return Err(invalid("resolved input root must have a lossless UTF-8 identity".into()));
+        }
+        let mut outputs = Vec::new();
+        for declared in std::iter::once(&sink.path).chain(sink.report_paths.iter()) {
+            let declared = absolute(declared).map_err(|e| io_refusal("resolve-output", declared, e))?;
+            if declared.starts_with(&root) {
+                return Err(invalid("all outputs must be outside the candidate input root".into()));
+            }
+            let parent = declared.parent().ok_or_else(|| invalid("output without parent".into()))?;
+            let parent = std::fs::canonicalize(parent)
+                .map_err(|e| io_refusal("resolve-output-parent", parent, e))?;
+            let parent_metadata = std::fs::metadata(&parent)
+                .map_err(|e| io_refusal("metadata-output-parent", &parent, e))?;
+            if !parent_metadata.is_dir() {
+                return Err(invalid("output parent must already be a directory".into()));
+            }
+            let name = declared.file_name().ok_or_else(|| invalid("output without filename".into()))?;
+            let resolved = parent.join(name);
+            if resolved.to_str().is_none() {
+                return Err(invalid("resolved output must have a lossless UTF-8 identity".into()));
+            }
+            if resolved.starts_with(&input_root) {
+                return Err(invalid("resolved output aliases the candidate input root".into()));
+            }
+            if outputs.contains(&resolved) {
+                return Err(invalid("manifest and reports must name distinct outputs".into()));
+            }
+            match std::fs::symlink_metadata(&resolved) {
+                Ok(_) if outputs.is_empty() => return Err(Refusal::Manifest {
+                    path: resolved, kind: "AlreadyExists".into(),
+                }),
+                Ok(_) => return Err(invalid("report output already exists".into())),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => (),
+                Err(e) => return Err(io_refusal("metadata-output", &resolved, e)),
+            }
+            outputs.push(resolved);
+        }
+        let manifest = outputs.remove(0);
+        Ok(Self { input_root, manifest, reports: outputs })
+    }
+}
+
+/// The real consumer can create only its predeclared, resolved report. Opening
+/// is exclusive and precedes the engine callback: no truncation or late build
+/// on a report-open failure. No parent directory is created implicitly.
+pub fn with_v3_report<H, R>(paths: &InvocationPaths, index: usize, trace: &Trace,
     build: impl FnOnce() -> H,
     panel: impl FnOnce(H, &mut std::fs::File) -> io::Result<R>) -> io::Result<R>
 {
-    let handle = build();
+    let path = paths.report_path(index).ok_or_else(||
+        io::Error::new(io::ErrorKind::InvalidInput, "undeclared report output"))?;
     trace.record(Event::Report);
-    std::fs::create_dir_all(path.parent().ok_or_else(||
-        io::Error::new(io::ErrorKind::InvalidInput, "report without parent"))?)?;
-    let mut report = std::fs::File::create(path)?;
+    let mut report = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+    let handle = build();
     panel(handle, &mut report)
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum OrdinalError { Missing }
+pub enum OrdinalError { Missing, OutsideView { ordinal: u64, documents: usize } }
 
-/// Exact ordinal conversion used by native search. RED: None still becomes
-/// zero; the missing-identity witness must fail before this fallback is fixed.
 pub fn document_ordinal(value: Option<u64>, documents: usize) -> Result<usize, OrdinalError> {
-    let ordinal = value.unwrap_or(0) as usize;
-    assert!(ordinal < documents, "index returned an ordinal outside the supplied view");
+    let value = value.ok_or(OrdinalError::Missing)?;
+    let invalid = || OrdinalError::OutsideView { ordinal: value, documents };
+    let ordinal = usize::try_from(value).map_err(|_| invalid())?;
+    if ordinal >= documents { return Err(invalid()); }
     Ok(ordinal)
 }
 
@@ -196,7 +273,7 @@ fn absolute(path: &Path) -> io::Result<PathBuf> {
 }
 
 fn validate(plan: &CapturePlan) -> Result<(), Refusal> {
-    let names: Vec<String> = plan.flags.iter().filter(|(name, _)| name != "V3_CORPUS" && name != "V3_ADMISSION_MANIFEST")
+    let names: Vec<String> = plan.flags.iter().filter(|(name, _)| name != "V3_CORPUS" && name != "V3_ADMISSION_MANIFEST" && name != "V3_CORRECTNESS_REPORT")
         .map(|(name, _)| name.clone()).collect();
     if !names.is_empty() { return Err(Refusal::Flags { names }); }
     if !plan.root.is_absolute() || plan.policy != POLICY || plan.cap != CAP ||
@@ -252,33 +329,35 @@ fn capture(plan: &CapturePlan, fs: &mut impl CaptureFs, out: &mut Snapshot) -> R
     walk(&plan.root, plan, fs, out)
 }
 
-/// Reserve once, validate flags before corpus access, capture once, check every
-/// fixed panel row, then fsync the receipt before granting the consumer access.
+/// Validate configuration without effects, admit the complete namespace, reserve
+/// once, capture once, check every fixed panel row, then fsync the receipt before
+/// granting the consumer the snapshot and validated output slots.
 /// There is no empty-success variant: every success consumed an admitted view.
 pub fn with_v3_contains<R>(plan: &CapturePlan, fs: &mut impl CaptureFs,
-    sink: &ManifestSink, trace: &Trace, consumer: impl FnOnce(&Snapshot) -> R)
+    sink: &ManifestSink, trace: &Trace, consumer: impl FnOnce(&Snapshot, &InvocationPaths) -> R)
     -> Result<R, Refusal>
 {
+    // Invalid configuration has no receipt: the destination itself is not yet
+    // admitted. In particular no metadata or output effect precedes Flags.
+    validate(plan)?;
     if plan.root.to_str().is_none() {
         return Err(Refusal::Plan { reason: "capture root must have a lossless UTF-8 identity".into() });
     }
+    let paths = InvocationPaths::prepare(plan, sink)?;
+    let sink = ManifestSink { path: paths.manifest.clone(), report_paths: paths.reports.clone(),
+        trace: sink.trace.clone() };
     let manifest_error = |e: io::Error| Refusal::Manifest { path: sink.path.clone(), kind: format!("{:?}", e.kind()) };
-    let root = absolute(&plan.root).map_err(&manifest_error)?;
-    let output = absolute(&sink.path).map_err(&manifest_error)?;
-    if output.starts_with(&root) {
-        return Err(Refusal::Plan { reason: "admission receipt must be outside the candidate root".into() });
-    }
     let out = sink.reserve().map_err(&manifest_error)?;
     let mut snapshot = Snapshot { files: vec![], pins: vec![] };
-    let admission = validate(plan).and_then(|()| capture(plan, fs, &mut snapshot)).and_then(|()| {
+    let admission = capture(plan, fs, &mut snapshot).and_then(|()| {
         if snapshot.files.is_empty() { return Err(Refusal::Empty); }
         let queries: Vec<String> = PANEL.iter().filter(|&&(needle, strict)|
             snapshot.literal_spans(needle, strict).is_empty())
             .map(|&(needle, strict)| format!("{needle}:{}", if strict { "strict" } else { "relax" })).collect();
         if queries.is_empty() { Ok(()) } else { Err(Refusal::Uncovered { queries }) }
     });
-    sink.publish(out, plan, &snapshot, admission.as_ref().err()).map_err(manifest_error)?;
+    sink.publish(out, plan, &paths, &snapshot, admission.as_ref().err()).map_err(manifest_error)?;
     admission?;
     trace.record(Event::Builder);
-    Ok(consumer(&snapshot))
+    Ok(consumer(&snapshot, &paths))
 }

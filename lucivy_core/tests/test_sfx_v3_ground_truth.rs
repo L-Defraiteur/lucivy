@@ -932,23 +932,26 @@ fn v3_ground_truth_contains() {
     let mut fs = StdFs { trace: trace.clone() };
     // Stable invocation path, exclusive reservation: no second capture after a
     // refusal. A new invocation needs a newly pinned receipt path, not deletion.
-    let report_path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join("lucivy-reports/v3_ground_truth_report.txt");
+    let report_path = std::env::var_os("V3_CORRECTNESS_REPORT").map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join("v3_ground_truth_correctness.jsonl"));
     let sink = ManifestSink {
         report_paths: vec![report_path.clone()],
         path: std::env::var_os("V3_ADMISSION_MANIFEST").map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("v3-admission.json")),
         trace: trace.clone(),
     };
-    fs_fixture::with_v3_contains(&plan, &mut fs, &sink, &trace, |snapshot| {
+    fs_fixture::with_v3_contains(&plan, &mut fs, &sink, &trace, |snapshot, paths| {
         let files = snapshot.files();
         eprintln!("\n=== V3 Ground Truth: {} admitted files ===\n", files.len());
-        fs_fixture::with_v3_report(&report_path, &trace, || {
+        fs_fixture::with_v3_report(paths, 0, &trace, || {
             let t0 = std::time::Instant::now();
             let handle = create_v3_index_with_plan(files, &trace, &IndexBuildPlan::fresh_correctness());
             (handle, t0.elapsed().as_secs_f64())
         }, |(handle, index_time), report| {
-            writeln!(report, "V3 Ground Truth Report — {} files, indexed in {:.1}s\n", files.len(), index_time)?;
+            writeln!(report, "{}", serde_json::json!({
+                "kind": "header", "documents": files.len(), "index_seconds": index_time,
+            }))?;
             run_admitted_panel(&handle, snapshot, report);
             Ok(())
         }).expect("correctness report failed");

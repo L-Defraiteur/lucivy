@@ -473,11 +473,17 @@ empty inputs, I/O errors, malformed text and uncovered rows before building.
 The index and reference scan consume the same immutable bytes. Its fresh RAM
 build cannot reuse, delete or persist an index. Diagnostic `V3_*` switches and
 `LUCIVY_CORPUS_ABSENT_OK` are refused by presence, including empty and `0` values;
-only `V3_CORPUS` and `V3_ADMISSION_MANIFEST` are accepted invocation inputs.
-The latter names a new exclusive admission receipt outside the corpus, whose
-parent must already exist. A receipt is hashed and synced before the builder;
+only `V3_CORPUS`, `V3_ADMISSION_MANIFEST` and `V3_CORRECTNESS_REPORT` are
+accepted invocation inputs. The output paths must be distinct and outside the
+input after resolving parent aliases; their parents must already exist, and
+neither output may exist. Invalid flags/configuration refuse before creating a
+receipt. Data refusals produce a hashed, synced REFUSED receipt on admitted
+outputs. An ADMITTED receipt is hashed and synced before the builder;
 reusing its pathname refuses before another capture. No corpus substitution
-or automatic retry follows a refusal. This entry does not change the diagnostic
+or automatic retry follows a refusal. Reports use exclusive creation, and a
+missing document ordinal is an error. The default correctness report is
+`v3_ground_truth_correctness.jsonl` in the target's test temporary directory.
+This entry does not change the diagnostic
 demo above or qualify a corpus by itself.
 
 The numbers above come from a tree at **Linux 7.2** (`Makefile`: 7.2.0,

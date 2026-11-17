@@ -48,7 +48,7 @@ fn run(root: &Path, fault: Option<(Fault, PathBuf)>) -> (Result<usize, Refusal>,
     let manifest = root.parent().unwrap().join(format!("{}.admission.json",
         root.file_name().unwrap().to_string_lossy()));
     let sink = ManifestSink { report_paths: vec![], path: manifest.clone(), trace: trace.clone() };
-    let result = with_v3_contains(&plan, &mut fs, &sink, &trace, |snapshot| {
+    let result = with_v3_contains(&plan, &mut fs, &sink, &trace, |snapshot, _paths| {
         trace.record(Event::Report);
         snapshot.files().len()
     });
@@ -138,7 +138,7 @@ fn covered_fixture_reaches_builder_once_on_the_captured_bytes() {
     let mut fs = SpyFs { inner: StdFs { trace: trace.clone() }, fault: None };
     let receipt_dir = fixture();
     let sink = ManifestSink { report_paths: vec![], path: receipt_dir.path().join("admission.json"), trace: trace.clone() };
-    let result = with_v3_contains(&plan, &mut fs, &sink, &trace, |snapshot| {
+    let result = with_v3_contains(&plan, &mut fs, &sink, &trace, |snapshot, _paths| {
         assert_eq!(snapshot.files().len(), 1);
         // Mutation after admission cannot change the builder's or oracle's view.
         std::fs::write(&path, b"changed after capture").unwrap();
@@ -178,13 +178,13 @@ fn flag_presence_is_refused_before_any_corpus_operation() {
             let trace = Trace::default();
             let mut fs = SpyFs { inner: StdFs { trace: trace.clone() }, fault: None };
             let sink = ManifestSink { report_paths: vec![], path: receipts.path().join("refused.json"), trace: trace.clone() };
-            let result = with_v3_contains(&plan, &mut fs, &sink, &trace, |_| {
+            let result = with_v3_contains(&plan, &mut fs, &sink, &trace, |_, _| {
                 trace.record(Event::Report);
             });
             eprintln!("flag={name:?} value={value:?} result={result:?} events={:?}", trace.events());
             assert!(matches!(result, Err(Refusal::Flags { names }) if names == vec![name.to_owned()]));
-            assert!(trace.events().iter().all(|e| matches!(e, Event::Manifest(_))));
-            assert_eq!(receipt(&sink.path)["body"]["verdict"], "REFUSED");
+            assert!(trace.events().is_empty(), "invalid flags caused an effect");
+            assert!(!sink.path.exists(), "invalid configuration must not reserve a receipt");
         }
     }
 }
@@ -206,13 +206,13 @@ fn existing_receipt_prevents_recapture_after_refusal() {
     let trace = Trace::default();
     let mut fs = SpyFs { inner: StdFs { trace: trace.clone() }, fault: None };
     let sink = ManifestSink { report_paths: vec![], path: receipts.path().join("once.json"), trace: trace.clone() };
-    let first = with_v3_contains(&plan, &mut fs, &sink, &trace, |_| ());
+    let first = with_v3_contains(&plan, &mut fs, &sink, &trace, |_, _| ());
     assert!(matches!(first, Err(Refusal::Empty)));
     let before = std::fs::read(&sink.path).unwrap();
     receipt(&sink.path);
     let events = trace.events();
     std::fs::write(root.path().join("now-covered.txt"), COVERED).unwrap();
-    let second = with_v3_contains(&plan, &mut fs, &sink, &trace, |_| ());
+    let second = with_v3_contains(&plan, &mut fs, &sink, &trace, |_, _| ());
     eprintln!("second={second:?} events={:?}", trace.events());
     assert!(matches!(second, Err(Refusal::Manifest { kind, .. }) if kind == "AlreadyExists"));
     assert_eq!(events, trace.events(), "a second invocation touched the candidate root");
@@ -254,8 +254,8 @@ fn output_case(fault: OutputFault, must_refuse: bool) {
     let mut fs = SpyFs { inner: StdFs { trace: trace.clone() }, fault: None };
     let sink = ManifestSink { path: manifest.clone(), report_paths: vec![report.clone()], trace: trace.clone() };
     let builds = Cell::new(0);
-    let result = with_v3_contains(&plan, &mut fs, &sink, &trace, |snapshot| {
-        with_v3_report(&report, &trace, || {
+    let result = with_v3_contains(&plan, &mut fs, &sink, &trace, |snapshot, paths| {
+        with_v3_report(paths, 0, &trace, || {
             builds.set(builds.get() + 1);
             snapshot.files().len()
         }, |documents, out| {
@@ -282,7 +282,10 @@ fn output_case(fault: OutputFault, must_refuse: bool) {
     } else {
         assert!(matches!(result, Ok(Ok(1))));
         assert_eq!(builds.get(), 1);
-        assert_eq!(receipt(&manifest)["body"]["verdict"], "ADMITTED");
+        let envelope = receipt(&manifest);
+        assert_eq!(envelope["body"]["verdict"], "ADMITTED");
+        assert_eq!(envelope["body"]["paths"]["manifest"], manifest.to_str().unwrap());
+        assert_eq!(envelope["body"]["paths"]["reports"][0], report.to_str().unwrap());
         assert_eq!(actual_report.unwrap(), b"index-report documents=1\n");
         assert_eq!(document_ordinal(Some(0), 1), Ok(0));
     }
@@ -316,7 +319,7 @@ fn invalid_flags_have_no_receipt_or_corpus_effects() {
     let mut fs = SpyFs { inner: StdFs { trace: trace.clone() }, fault: None };
     let sink = ManifestSink { path: outputs.path().join("must-not-exist.json"),
         report_paths: vec![], trace: trace.clone() };
-    let actual = with_v3_contains(&plan, &mut fs, &sink, &trace, |_| ());
+    let actual = with_v3_contains(&plan, &mut fs, &sink, &trace, |_, _| ());
     let receipt_bytes = std::fs::read(&sink.path).ok();
     eprintln!("invalid_flags result={actual:?} events={:?} receipt={receipt_bytes:?}", trace.events());
     assert!(matches!(actual, Err(Refusal::Flags { names }) if names == vec!["V3_INDEX_DIR".to_owned()]));
