@@ -13,6 +13,7 @@
 
 pub mod corpus_oracle;
 pub mod derived_fixture;
+pub mod fs_fixture;
 
 pub const ABSENT_OK: &str = "LUCIVY_CORPUS_ABSENT_OK";
 

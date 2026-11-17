@@ -13,6 +13,7 @@
 
 mod common;
 use common::corpus_oracle::{self, is_content_char, strip_seps};
+use common::fs_fixture::{self, CapturePlan, Event, ManifestSink, StdFs, Trace};
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -218,8 +219,9 @@ fn print_shape(handle: &LucivyHandle) {
         sizes.len(), shown.join(" "), if sizes.len() > 12 { " …" } else { "" });
 }
 
-fn try_reuse_index(files: &[(String, String)]) -> Option<LucivyHandle> {
+fn try_reuse_index(files: &[(String, String)], trace: &Trace) -> Option<LucivyHandle> {
     let dir_path = std::env::var("V3_INDEX_DIR").ok()?;
+    trace.record(Event::Reuse(dir_path.clone().into()));
     let key_path = std::path::Path::new(&dir_path).join(".v3_shape");
     let want = index_shape_key(files.len());
     if std::fs::read_to_string(&key_path).ok()? != want {
@@ -234,6 +236,10 @@ fn try_reuse_index(files: &[(String, String)]) -> Option<LucivyHandle> {
 }
 
 fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
+    create_v3_index_observed(files, &Trace::default())
+}
+
+fn create_v3_index_observed(files: &[(String, String)], trace: &Trace) -> LucivyHandle {
     let config: SchemaConfig = serde_json::from_value(serde_json::json!({
         "fields": [
             {"name": "path", "type": "text", "stored": true},
@@ -249,7 +255,7 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
         "positions": !no_positions()
     })).unwrap();
 
-    if let Some(h) = try_reuse_index(files) {
+    if let Some(h) = try_reuse_index(files, trace) {
         return h;
     }
 
@@ -377,7 +383,9 @@ fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
     if let Some(path) = std::env::var("V3_INDEX_DIR").ok() {
         let t = std::time::Instant::now();
         let root = std::path::Path::new(&path);
+        trace.record(Event::Delete(root.into()));
         let _ = std::fs::remove_dir_all(root);
+        trace.record(Event::Persist(root.into()));
         ram_dir.persist_unsynced(root).unwrap();
         std::fs::write(root.join(".v3_shape"), index_shape_key(files.len())).unwrap();
         eprintln!("  index persisted to {path} in {:.1}s", t.elapsed().as_secs_f64());
@@ -852,50 +860,40 @@ fn filter_boundaries(gt: GrepSpans, files: &[(String, String)], anchor: bool, ex
 
 #[test]
 fn v3_ground_truth_contains() {
-    let files = collect_files(5000);
-    if files.is_empty() { return; }
-    eprintln!("\n=== V3 Ground Truth: {} files ===\n", files.len());
-
-    let t0 = std::time::Instant::now();
-    let handle = create_v3_index(&files);
-    let index_time = t0.elapsed().as_secs_f64();
-    eprintln!("Index time: {:.1}s", index_time);
-
-    let mut report = std::fs::File::create(ground_truth_report()).unwrap();
-    writeln!(report, "V3 Ground Truth Report — {} files, indexed in {:.1}s\n", files.len(), index_time).ok();
-
-    // Each query tested in both modes:
-    // strict_sep=true: literal grep comparison
-    // strict_sep=false: sep-agnostic grep comparison
-    // Queries must actually occur in the corpus under test: half the rag3db set
-    // (rag3db, std::unique_ptr, ku_dynamic_cast) returns 0 hits on the kernel, which
-    // measures nothing. `V3_QUERIES` takes a comma-separated list of `value` or
-    // `value:relax` entries.
-    let custom_queries: Option<Vec<GroundTruthQuery>> = query_spec();
-
-    let default_queries: Vec<GroundTruthQuery> = vec![
-        // Simple words — both modes should agree
-        GroundTruthQuery::strict("function"),
-        GroundTruthQuery::relaxed("function"),
-        GroundTruthQuery::strict("return"),
-        GroundTruthQuery::strict("struct"),
-        GroundTruthQuery::strict("void"),
-        GroundTruthQuery::strict("rag3db"),
-        GroundTruthQuery::strict("include"),
-        // Queries with separators — test both modes explicitly
-        GroundTruthQuery::strict("uint64_t"),
-        GroundTruthQuery::relaxed("uint64_t"),
-        GroundTruthQuery::strict("std::unique_ptr"),
-        GroundTruthQuery::relaxed("std::unique_ptr"),
-        GroundTruthQuery::strict("ku_dynamic_cast"),
-        GroundTruthQuery::relaxed("ku_dynamic_cast"),
-        // Mixed case — relaxed mode expands matches
-        GroundTruthQuery::strict("TableFunction"),
-        GroundTruthQuery::relaxed("TableFunction"),
-    ];
-
-    let queries = custom_queries.unwrap_or(default_queries);
-    run_panel(&handle, &files, &queries, &mut report);
+    let root = std::path::PathBuf::from(repo_path());
+    // Preserve the historical absent-root guard until the admission fix.
+    if !root.exists() {
+        common::usable(&root.to_string_lossy(), 0, 1, "skipped, nothing is checked");
+        return;
+    }
+    let mut plan = CapturePlan::initial(root);
+    plan.cap = max_docs(5000);
+    plan.flags = std::env::vars().filter(|(name, _)| name.starts_with("V3_")).collect();
+    let trace = Trace::default();
+    let mut fs = StdFs { trace: trace.clone() };
+    // Constructing this sink does not create a directory or touch a corpus.
+    // RED baseline intentionally does not publish an admission verdict yet.
+    let sink = ManifestSink {
+        path: std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("v3-admission.json"),
+        trace: trace.clone(),
+    };
+    fs_fixture::with_v3_contains(&plan, &mut fs, &sink, &trace, |snapshot| {
+        let files = snapshot.files();
+        eprintln!("\n=== V3 Ground Truth: {} files ===\n", files.len());
+        let t0 = std::time::Instant::now();
+        let handle = create_v3_index_observed(files, &trace);
+        let index_time = t0.elapsed().as_secs_f64();
+        eprintln!("Index time: {:.1}s", index_time);
+        trace.record(Event::Report);
+        let mut report = std::fs::File::create(ground_truth_report()).unwrap();
+        writeln!(report, "V3 Ground Truth Report — {} files, indexed in {:.1}s\n", files.len(), index_time).ok();
+        let default_queries = fs_fixture::PANEL.iter().map(|&(value, strict)| {
+            if strict { GroundTruthQuery::strict(value) } else { GroundTruthQuery::relaxed(value) }
+        }).collect();
+        let queries = query_spec().unwrap_or(default_queries);
+        // Baseline still rereads for its oracle. No read-once claim before the fix.
+        run_panel(&handle, files, &queries, &mut report);
+    }).unwrap();
 }
 
 /// A relaxed fuzzy query must find an occurrence that straddles token
