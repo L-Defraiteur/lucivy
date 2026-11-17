@@ -120,7 +120,13 @@ pub fn sha256(bytes: &[u8]) -> String {
 /// Exclusive admission receipt, distinct from any index report. Reserve before
 /// capture: reusing an invocation path cannot trigger a second selection.
 /// Construction has no I/O. Parent must already exist, outside the input root.
-pub struct ManifestSink { pub path: PathBuf, pub trace: Trace }
+pub struct ManifestSink {
+    pub path: PathBuf,
+    // Declared by the real consumer, deliberately NOT validated in this RED
+    // extraction. The output witnesses must expose the existing omissions.
+    pub report_paths: Vec<PathBuf>,
+    pub trace: Trace,
+}
 impl ManifestSink {
     fn reserve(&self) -> io::Result<std::fs::File> {
         let out = std::fs::OpenOptions::new().write(true).create_new(true).open(&self.path)?;
@@ -143,6 +149,31 @@ impl ManifestSink {
             io::Error::new(io::ErrorKind::InvalidInput, "manifest without parent"))?)?.sync_all()?;
         Ok(digest)
     }
+}
+
+/// Exact report-effect seam used by the native correctness callback. RED:
+/// preserves build-before-report and File::create truncation until witnessed.
+pub fn with_v3_report<H, R>(path: &Path, trace: &Trace,
+    build: impl FnOnce() -> H,
+    panel: impl FnOnce(H, &mut std::fs::File) -> io::Result<R>) -> io::Result<R>
+{
+    let handle = build();
+    trace.record(Event::Report);
+    std::fs::create_dir_all(path.parent().ok_or_else(||
+        io::Error::new(io::ErrorKind::InvalidInput, "report without parent"))?)?;
+    let mut report = std::fs::File::create(path)?;
+    panel(handle, &mut report)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum OrdinalError { Missing }
+
+/// Exact ordinal conversion used by native search. RED: None still becomes
+/// zero; the missing-identity witness must fail before this fallback is fixed.
+pub fn document_ordinal(value: Option<u64>, documents: usize) -> Result<usize, OrdinalError> {
+    let ordinal = value.unwrap_or(0) as usize;
+    assert!(ordinal < documents, "index returned an ordinal outside the supplied view");
+    Ok(ordinal)
 }
 
 fn io_refusal(operation: &str, path: &Path, error: io::Error) -> Refusal {

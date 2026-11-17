@@ -673,10 +673,9 @@ fn search_v3_q_limited(
     for (_, addr) in &results {
         // The file index is the `_node_id` fast field: no document is read
         // (5 202 full documents were 114 ms on `mutex_lock`, 13 September).
-        let file_idx = searcher.segment_reader(addr.segment_ord)
-            .fast_fields().u64(NODE_ID_FIELD).unwrap()
-            .first(addr.doc_id).unwrap_or(0) as usize;
-        assert!(file_idx < files.len(), "index returned an ordinal outside the supplied view");
+        let file_idx = fs_fixture::document_ordinal(searcher.segment_reader(addr.segment_ord)
+            .fast_fields().u64(NODE_ID_FIELD).unwrap().first(addr.doc_id), files.len())
+            .expect("index document has no admitted ordinal");
         doc_indices.insert(file_idx);
 
         let seg_id = searcher.segment_reader(addr.segment_ord).segment_id();
@@ -933,7 +932,10 @@ fn v3_ground_truth_contains() {
     let mut fs = StdFs { trace: trace.clone() };
     // Stable invocation path, exclusive reservation: no second capture after a
     // refusal. A new invocation needs a newly pinned receipt path, not deletion.
+    let report_path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("lucivy-reports/v3_ground_truth_report.txt");
     let sink = ManifestSink {
+        report_paths: vec![report_path.clone()],
         path: std::env::var_os("V3_ADMISSION_MANIFEST").map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("v3-admission.json")),
         trace: trace.clone(),
@@ -941,13 +943,15 @@ fn v3_ground_truth_contains() {
     fs_fixture::with_v3_contains(&plan, &mut fs, &sink, &trace, |snapshot| {
         let files = snapshot.files();
         eprintln!("\n=== V3 Ground Truth: {} admitted files ===\n", files.len());
-        let t0 = std::time::Instant::now();
-        let handle = create_v3_index_with_plan(files, &trace, &IndexBuildPlan::fresh_correctness());
-        let index_time = t0.elapsed().as_secs_f64();
-        trace.record(Event::Report);
-        let mut report = std::fs::File::create(ground_truth_report()).unwrap();
-        writeln!(report, "V3 Ground Truth Report — {} files, indexed in {:.1}s\n", files.len(), index_time).unwrap();
-        run_admitted_panel(&handle, snapshot, &mut report);
+        fs_fixture::with_v3_report(&report_path, &trace, || {
+            let t0 = std::time::Instant::now();
+            let handle = create_v3_index_with_plan(files, &trace, &IndexBuildPlan::fresh_correctness());
+            (handle, t0.elapsed().as_secs_f64())
+        }, |(handle, index_time), report| {
+            writeln!(report, "V3 Ground Truth Report — {} files, indexed in {:.1}s\n", files.len(), index_time)?;
+            run_admitted_panel(&handle, snapshot, report);
+            Ok(())
+        }).expect("correctness report failed");
     }).expect("corpus admission refused; no correctness comparison was run");
 }
 

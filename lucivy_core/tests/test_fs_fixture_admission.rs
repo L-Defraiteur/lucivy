@@ -47,7 +47,7 @@ fn run(root: &Path, fault: Option<(Fault, PathBuf)>) -> (Result<usize, Refusal>,
     let mut fs = SpyFs { inner: StdFs { trace: trace.clone() }, fault };
     let manifest = root.parent().unwrap().join(format!("{}.admission.json",
         root.file_name().unwrap().to_string_lossy()));
-    let sink = ManifestSink { path: manifest.clone(), trace: trace.clone() };
+    let sink = ManifestSink { report_paths: vec![], path: manifest.clone(), trace: trace.clone() };
     let result = with_v3_contains(&plan, &mut fs, &sink, &trace, |snapshot| {
         trace.record(Event::Report);
         snapshot.files().len()
@@ -137,7 +137,7 @@ fn covered_fixture_reaches_builder_once_on_the_captured_bytes() {
     let trace = Trace::default();
     let mut fs = SpyFs { inner: StdFs { trace: trace.clone() }, fault: None };
     let receipt_dir = fixture();
-    let sink = ManifestSink { path: receipt_dir.path().join("admission.json"), trace: trace.clone() };
+    let sink = ManifestSink { report_paths: vec![], path: receipt_dir.path().join("admission.json"), trace: trace.clone() };
     let result = with_v3_contains(&plan, &mut fs, &sink, &trace, |snapshot| {
         assert_eq!(snapshot.files().len(), 1);
         // Mutation after admission cannot change the builder's or oracle's view.
@@ -177,7 +177,7 @@ fn flag_presence_is_refused_before_any_corpus_operation() {
             plan.flags.push((name.into(), value.into()));
             let trace = Trace::default();
             let mut fs = SpyFs { inner: StdFs { trace: trace.clone() }, fault: None };
-            let sink = ManifestSink { path: receipts.path().join("refused.json"), trace: trace.clone() };
+            let sink = ManifestSink { report_paths: vec![], path: receipts.path().join("refused.json"), trace: trace.clone() };
             let result = with_v3_contains(&plan, &mut fs, &sink, &trace, |_| {
                 trace.record(Event::Report);
             });
@@ -205,7 +205,7 @@ fn existing_receipt_prevents_recapture_after_refusal() {
     let plan = CapturePlan::initial(root.path().into());
     let trace = Trace::default();
     let mut fs = SpyFs { inner: StdFs { trace: trace.clone() }, fault: None };
-    let sink = ManifestSink { path: receipts.path().join("once.json"), trace: trace.clone() };
+    let sink = ManifestSink { report_paths: vec![], path: receipts.path().join("once.json"), trace: trace.clone() };
     let first = with_v3_contains(&plan, &mut fs, &sink, &trace, |_| ());
     assert!(matches!(first, Err(Refusal::Empty)));
     let before = std::fs::read(&sink.path).unwrap();
@@ -217,4 +217,113 @@ fn existing_receipt_prevents_recapture_after_refusal() {
     assert!(matches!(second, Err(Refusal::Manifest { kind, .. }) if kind == "AlreadyExists"));
     assert_eq!(events, trace.events(), "a second invocation touched the candidate root");
     assert_eq!(before, std::fs::read(&sink.path).unwrap());
+}
+
+// Additional RED witnesses. These call the report and identity seams used by
+// the actual native consumer; no engine or external corpus is involved.
+#[derive(Clone, Copy, Debug)]
+enum OutputFault { Collision, InsideInput, AliasParent }
+
+fn output_case(fault: OutputFault, must_refuse: bool) {
+    use std::{cell::Cell, io::Write};
+    let root = fixture();
+    let outputs = fixture();
+    std::fs::write(root.path().join("covered.txt"), COVERED).unwrap();
+    let mut manifest = outputs.path().join("admission.json");
+    let mut report = outputs.path().join("report.txt");
+    match fault {
+        OutputFault::Collision => report = manifest.clone(),
+        OutputFault::InsideInput => report = root.path().join("report.txt"),
+        OutputFault::AliasParent => {
+            #[cfg(unix)]
+            {
+                let alias = outputs.path().join("alias-to-input");
+                std::os::unix::fs::symlink(root.path(), &alias).unwrap();
+                manifest = alias.join("admission.json");
+            }
+            #[cfg(not(unix))]
+            panic!("the alias witness requires the admitted Unix platform");
+        }
+    }
+    if !must_refuse {
+        manifest = outputs.path().join("positive-admission.json");
+        report = outputs.path().join("positive-report.txt");
+    }
+    let plan = CapturePlan::initial(root.path().into());
+    let trace = Trace::default();
+    let mut fs = SpyFs { inner: StdFs { trace: trace.clone() }, fault: None };
+    let sink = ManifestSink { path: manifest.clone(), report_paths: vec![report.clone()], trace: trace.clone() };
+    let builds = Cell::new(0);
+    let result = with_v3_contains(&plan, &mut fs, &sink, &trace, |snapshot| {
+        with_v3_report(&report, &trace, || {
+            builds.set(builds.get() + 1);
+            snapshot.files().len()
+        }, |documents, out| {
+            writeln!(out, "index-report documents={documents}")?;
+            out.sync_all()?;
+            Ok(documents)
+        })
+    });
+    let actual_manifest = std::fs::read(&manifest).ok();
+    let actual_report = std::fs::read(&report).ok();
+    // Preserve effects and bytes before the discriminating assertion. A
+    // truncated receipt is data here, not a JSON setup ERROR.
+    eprintln!("output_fault={fault:?} expected_refusal={must_refuse} result={result:?} builds={} events={:?} manifest={actual_manifest:?} report={actual_report:?}", builds.get(), trace.events());
+    if must_refuse {
+        assert!(matches!(result, Err(Refusal::Plan { .. })),
+            "unsafe declared outputs accepted before consumer: {fault:?} result={result:?}");
+        assert_eq!(builds.get(), 0);
+        assert!(!trace.events().iter().any(|e| matches!(e, Event::Enumerate(_) | Event::Read(_))),
+            "invalid outputs reached candidate capture");
+        assert!(!trace.events().iter().any(|e| matches!(e, Event::Builder | Event::Report |
+            Event::Reuse(_) | Event::Delete(_) | Event::Persist(_))));
+        assert!(actual_manifest.is_none(), "invalid configuration created a receipt");
+        assert!(actual_report.is_none(), "invalid configuration created a report");
+    } else {
+        assert!(matches!(result, Ok(Ok(1))));
+        assert_eq!(builds.get(), 1);
+        assert_eq!(receipt(&manifest)["body"]["verdict"], "ADMITTED");
+        assert_eq!(actual_report.unwrap(), b"index-report documents=1\n");
+        assert_eq!(document_ordinal(Some(0), 1), Ok(0));
+    }
+}
+
+#[test]
+fn report_receipt_collision_is_refused_before_consumer() {
+    output_case(OutputFault::Collision, true);
+}
+#[test]
+fn report_inside_input_is_refused_before_consumer() {
+    output_case(OutputFault::InsideInput, true);
+}
+#[test]
+fn aliased_output_parent_is_refused_before_consumer() {
+    output_case(OutputFault::AliasParent, true);
+}
+#[test]
+fn missing_document_ordinal_is_not_document_zero() {
+    let actual = document_ordinal(None, 1);
+    eprintln!("document_ordinal(None,1)={actual:?}");
+    assert_eq!(actual, Err(OrdinalError::Missing), "missing identity was admitted as document zero");
+}
+#[test]
+fn invalid_flags_have_no_receipt_or_corpus_effects() {
+    let root = fixture();
+    let outputs = fixture();
+    let mut plan = CapturePlan::initial(root.path().into());
+    plan.flags.push(("V3_INDEX_DIR".into(), "".into()));
+    let trace = Trace::default();
+    let mut fs = SpyFs { inner: StdFs { trace: trace.clone() }, fault: None };
+    let sink = ManifestSink { path: outputs.path().join("must-not-exist.json"),
+        report_paths: vec![], trace: trace.clone() };
+    let actual = with_v3_contains(&plan, &mut fs, &sink, &trace, |_| ());
+    let receipt_bytes = std::fs::read(&sink.path).ok();
+    eprintln!("invalid_flags result={actual:?} events={:?} receipt={receipt_bytes:?}", trace.events());
+    assert!(matches!(actual, Err(Refusal::Flags { names }) if names == vec!["V3_INDEX_DIR".to_owned()]));
+    assert!(trace.events().is_empty(), "invalid flags caused an output or corpus effect");
+    assert!(receipt_bytes.is_none());
+}
+#[test]
+fn distinct_outputs_and_present_ordinal_reach_consumer_once() {
+    output_case(OutputFault::Collision, false);
 }
