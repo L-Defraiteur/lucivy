@@ -466,6 +466,20 @@ V3_CORPUS=/tmp/linux-bench V3_SFX_VERSION=4 cargo test --release -p lucivy-core 
     --test test_sfx_v3_ground_truth v3_ground_truth_demo -- --ignored --nocapture
 ```
 
+The separate `v3_ground_truth_contains` correctness entry uses a fixed
+15-row literal/relaxed panel and a single captured view of at most 5,000 text
+files, in the filesystem's effective enumeration order. It refuses missing or
+empty inputs, I/O errors, malformed text and uncovered rows before building.
+The index and reference scan consume the same immutable bytes. Its fresh RAM
+build cannot reuse, delete or persist an index. Diagnostic `V3_*` switches and
+`LUCIVY_CORPUS_ABSENT_OK` are refused by presence, including empty and `0` values;
+only `V3_CORPUS` and `V3_ADMISSION_MANIFEST` are accepted invocation inputs.
+The latter names a new exclusive admission receipt outside the corpus, whose
+parent must already exist. A receipt is hashed and synced before the builder;
+reusing its pathname refuses before another capture. No corpus substitution
+or automatic retry follows a refusal. This entry does not change the diagnostic
+demo above or qualify a corpus by itself.
+
 The numbers above come from a tree at **Linux 7.2** (`Makefile`: 7.2.0,
 "Baby Opossum Posse"; copied on 28 August 2026, so at the release tag or a few
 commits after it): 93 983 text files after the harness's filter. Another tree

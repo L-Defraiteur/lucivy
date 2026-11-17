@@ -235,28 +235,49 @@ fn try_reuse_index(files: &[(String, String)], trace: &Trace) -> Option<LucivyHa
     Some(handle)
 }
 
-fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
-    create_v3_index_observed(files, &Trace::default())
+/// Diagnostic callers retain their knobs. Correctness receives an explicit
+/// fixed plan without any capability to reopen, remove or persist an index.
+struct IndexBuildPlan {
+    schema: SchemaConfig,
+    commit_every: usize,
+    merge: Option<(usize, usize, bool)>,
+    automatic_policy: bool,
+    threads: Option<usize>,
+    persistence: Option<String>,
+}
+impl IndexBuildPlan {
+    fn fresh_correctness() -> Self {
+        Self { schema: Self::schema(3, false, true), commit_every: 500,
+            merge: None, automatic_policy: false, threads: None, persistence: None }
+    }
+    fn schema(version: u8, derived: bool, positions: bool) -> SchemaConfig {
+        serde_json::from_value(serde_json::json!({
+            "fields": [
+                {"name": "path", "type": "text", "stored": true},
+                {"name": "content", "type": "text", "stored": true}
+            ], "sfx_version": version, "derived_in_ram": derived, "positions": positions
+        })).unwrap()
+    }
+    fn diagnostic() -> Self {
+        Self {
+            schema: Self::schema(std::env::var("V3_SFX_VERSION").ok()
+                .and_then(|v| v.parse::<u8>().ok()).unwrap_or(3),
+                std::env::var_os("V3_DERIVED_IN_RAM").is_some(), !no_positions()),
+            commit_every: commit_every(500), merge: merge_params(),
+            automatic_policy: std::env::var_os("V3_POLICY").is_some(),
+            threads: std::env::var("V3_THREADS").ok().and_then(|v| v.parse().ok()),
+            persistence: std::env::var("V3_INDEX_DIR").ok(),
+        }
+    }
 }
 
-fn create_v3_index_observed(files: &[(String, String)], trace: &Trace) -> LucivyHandle {
-    let config: SchemaConfig = serde_json::from_value(serde_json::json!({
-        "fields": [
-            {"name": "path", "type": "text", "stored": true},
-            {"name": "content", "type": "text", "stored": true}
-        ],
-        // `V3_SFX_VERSION=4` builds the index on the shard dictionary.
-        "sfx_version": std::env::var("V3_SFX_VERSION").ok().and_then(|v| v.parse::<u8>().ok()).unwrap_or(3),
-        // `V3_DERIVED_IN_RAM=1`: no `.posmap` / `.word_pos_map` / `.sibling_v3` on
-        // disk, rebuilt in RAM on first use.
-        "derived_in_ram": std::env::var("V3_DERIVED_IN_RAM").is_ok(),
-        // `V3_POSITIONS=0`: postings without positions, matches verified on
-        // the stored text (4.1).
-        "positions": !no_positions()
-    })).unwrap();
+fn create_v3_index(files: &[(String, String)]) -> LucivyHandle {
+    create_v3_index_with_plan(files, &Trace::default(), &IndexBuildPlan::diagnostic())
+}
 
-    if let Some(h) = try_reuse_index(files, trace) {
-        return h;
+fn create_v3_index_with_plan(files: &[(String, String)], trace: &Trace, plan: &IndexBuildPlan) -> LucivyHandle {
+    if plan.persistence.is_some() {
+        if let Some(h) = try_reuse_index(files, trace) { return h; }
     }
 
     // Always build in RAM. Building straight into an MmapDirectory was tried:
@@ -265,7 +286,7 @@ fn create_v3_index_observed(files: &[(String, String)], trace: &Trace) -> Lucivy
     // 5s in RAM. The index is copied out once at the end instead, unsynced; the
     // shape marker written after it is what makes the copy trustworthy.
     let ram_dir = ld_lucivy::directory::RamDirectory::default();
-    let handle = LucivyHandle::create(ram_dir.clone(), &config).unwrap();
+    let handle = LucivyHandle::create(ram_dir.clone(), &plan.schema).unwrap();
     let path_f = handle.field("path").unwrap();
     let content_f = handle.field("content").unwrap();
     let nid_f = handle.field(NODE_ID_FIELD).unwrap();
@@ -273,8 +294,7 @@ fn create_v3_index_observed(files: &[(String, String)], trace: &Trace) -> Lucivy
     // Documents per commit. Each commit closes segments, so this is the direct knob
     // on segment count — and segment count is the unit of prescan parallelism, so it
     // drives query latency more than anything else measured today.
-    let commit_every: usize = std::env::var("V3_COMMIT_EVERY").ok()
-        .and_then(|v| v.parse().ok()).filter(|&n| n > 0).unwrap_or(500);
+    let commit_every = plan.commit_every;
 
     {
         let mut guard = handle.writer.lock().unwrap();
@@ -284,7 +304,7 @@ fn create_v3_index_observed(files: &[(String, String)], trace: &Trace) -> Lucivy
         // the policy fires on commit, and an explicit merge overlapping a
         // running one is refused. `V3_POLICY=1` hands the index to the
         // handle's LogMergePolicy instead and skips the harness merges.
-        if std::env::var("V3_POLICY").is_err() {
+        if !plan.automatic_policy {
             w.set_merge_policy(Box::new(ld_lucivy::indexer::NoMergePolicy));
         }
         for (i, (path, content)) in files.iter().enumerate() {
@@ -298,7 +318,7 @@ fn create_v3_index_observed(files: &[(String, String)], trace: &Trace) -> Lucivy
                 // Keep the segment count bounded as we go. Left to the end, this
                 // same work merges a much larger pile in one burst — which is what
                 // made every previous run finish with a multi-minute merge.
-                if let Some((target, group, true)) = merge_params() {
+                if let Some((target, group, true)) = plan.merge {
                     let ids = handle.index.searchable_segment_ids().unwrap();
                     if ids.len() > target.saturating_mul(2) {
                         if merge_round(w, &ids, target, group) {
@@ -329,7 +349,7 @@ fn create_v3_index_observed(files: &[(String, String)], trace: &Trace) -> Lucivy
     // Merging all of them at once is the one thing no policy would do, and it
     // showed: 18 GB re-indexing, 30 GB remapping. max_docs_before_merge exists to
     // bound exactly that, so respect it and merge in groups.
-    if let Some((target, group, _)) = merge_params() {
+    if let Some((target, group, _)) = plan.merge {
         let t = std::time::Instant::now();
         handle.reader.reload().unwrap();
         let before = handle.reader.searcher().segment_readers().len();
@@ -367,7 +387,7 @@ fn create_v3_index_observed(files: &[(String, String)], trace: &Trace) -> Lucivy
     // happens in Query::weight (prescan), which runs BEFORE executor.map — measured
     // 1.0x on 80 segments / 24 threads. Exposed so that can be re-checked, not
     // because it is expected to help.
-    if let Some(n) = std::env::var("V3_THREADS").ok().and_then(|v| v.parse::<usize>().ok()) {
+    if let Some(n) = plan.threads {
         if n > 1 {
             let mut idx = handle.index.clone();
             idx.set_multithread_executor(n).unwrap();
@@ -380,9 +400,9 @@ fn create_v3_index_observed(files: &[(String, String)], trace: &Trace) -> Lucivy
     // Persist once, then stamp the shape last: a key on disk means the index
     // next to it is complete. The handle keeps serving from RAM for this run;
     // the next run reopens the copy through MmapDirectory.
-    if let Some(path) = std::env::var("V3_INDEX_DIR").ok() {
+    if let Some(path) = &plan.persistence {
         let t = std::time::Instant::now();
-        let root = std::path::Path::new(&path);
+        let root = std::path::Path::new(path);
         trace.record(Event::Delete(root.into()));
         let _ = std::fs::remove_dir_all(root);
         trace.record(Event::Persist(root.into()));
@@ -613,6 +633,15 @@ fn search_v3_q(
     exact: bool,
     min_sim: Option<f32>,
 ) -> SearchResult {
+    search_v3_q_limited(handle, files, value, strict_separators, distance, anchor, exact,
+        min_sim, result_limit(files))
+}
+
+fn search_v3_q_limited(
+    handle: &LucivyHandle, files: &[(String, String)], value: &str,
+    strict_separators: bool, distance: u8, anchor: bool, exact: bool,
+    min_sim: Option<f32>, limit: usize,
+) -> SearchResult {
     let sink = Arc::new(ld_lucivy::query::HighlightSink::new());
     let config = QueryConfig {
         query_type: "contains".into(),
@@ -629,7 +658,7 @@ fn search_v3_q(
     };
     let query = query::build_query(&config, &handle.schema, &handle.index, Some(Arc::clone(&sink))).unwrap();
     let searcher = handle.reader.searcher();
-    let collector = ld_lucivy::collector::TopDocs::with_limit(result_limit(files)).order_by_score();
+    let collector = ld_lucivy::collector::TopDocs::with_limit(limit).order_by_score();
     let t_search = std::time::Instant::now();
     let results = searcher.search(&*query, &collector).unwrap();
     let search_ms = t_search.elapsed().as_secs_f64() * 1000.0;
@@ -647,6 +676,7 @@ fn search_v3_q(
         let file_idx = searcher.segment_reader(addr.segment_ord)
             .fast_fields().u64(NODE_ID_FIELD).unwrap()
             .first(addr.doc_id).unwrap_or(0) as usize;
+        assert!(file_idx < files.len(), "index returned an ordinal outside the supplied view");
         doc_indices.insert(file_idx);
 
         let seg_id = searcher.segment_reader(addr.segment_ord).segment_id();
@@ -858,42 +888,67 @@ fn filter_boundaries(gt: GrepSpans, files: &[(String, String)], anchor: bool, ex
 
 // ─── Tests ────────────────────────────────────────────────────────────────
 
+/// Correctness uses the same immutable snapshot for admission, indexing and
+/// reference spans. It does not enter the diagnostic panel's live-FS or flag paths.
+fn run_admitted_panel(handle: &LucivyHandle, snapshot: &fs_fixture::Snapshot,
+                      report: &mut std::fs::File) {
+    let files = snapshot.files();
+    for &(needle, strict) in fs_fixture::PANEL {
+        let expected: HashSet<_> = snapshot.literal_spans(needle, strict).into_iter().collect();
+        assert!(!expected.is_empty(), "admitted panel lost coverage: {needle:?}/{strict}");
+        let docs: HashSet<_> = expected.iter().map(|&(ordinal, _, _)| ordinal).collect();
+        let result = search_v3_q_limited(handle, files, needle, strict, 0, false, false,
+            None, files.len());
+        let actual: HashSet<_> = result.highlights.iter().copied().collect();
+        let mode = if strict { "strict" } else { "relax" };
+        let mut expected_rows: Vec<_> = expected.iter().copied().collect();
+        let mut actual_rows: Vec<_> = actual.iter().copied().collect();
+        expected_rows.sort_unstable();
+        actual_rows.sort_unstable();
+        writeln!(report, "{}", serde_json::json!({
+            "query": needle, "strict": strict, "expected_spans": expected_rows,
+            "actual_spans": actual_rows, "returned_highlights": result.highlights.len(),
+            "expected_docs": docs, "actual_docs": result.doc_indices,
+        })).expect("write correctness row");
+        report.sync_all().expect("durable correctness row before assertion");
+        assert_eq!(result.doc_indices, docs, "document mismatch: {needle:?}/{mode}");
+        assert_eq!(result.highlights.len(), actual.len(), "duplicate spans: {needle:?}/{mode}");
+        assert_eq!(actual, expected, "span mismatch: {needle:?}/{mode}");
+    }
+    report.sync_all().expect("durable correctness report");
+}
+
 #[test]
 fn v3_ground_truth_contains() {
-    let root = std::path::PathBuf::from(repo_path());
-    // Preserve the historical absent-root guard until the admission fix.
-    if !root.exists() {
-        common::usable(&root.to_string_lossy(), 0, 1, "skipped, nothing is checked");
-        return;
-    }
+    // Preserve non-Unicode roots as paths; never silently fall back to a default.
+    let root = std::env::var_os("V3_CORPUS").map(std::path::PathBuf::from)
+        .unwrap_or_else(|| DEFAULT_REPO_PATH.into());
     let mut plan = CapturePlan::initial(root);
-    plan.cap = max_docs(5000);
-    plan.flags = std::env::vars().filter(|(name, _)| name.starts_with("V3_")).collect();
+    plan.flags = std::env::vars_os().filter_map(|(name, value)| {
+        let name = name.to_string_lossy();
+        (name.starts_with("V3_") || name == common::ABSENT_OK)
+            .then(|| (name.into_owned(), value.to_string_lossy().into_owned()))
+    }).collect();
     let trace = Trace::default();
     let mut fs = StdFs { trace: trace.clone() };
-    // Constructing this sink does not create a directory or touch a corpus.
-    // RED baseline intentionally does not publish an admission verdict yet.
+    // Stable invocation path, exclusive reservation: no second capture after a
+    // refusal. A new invocation needs a newly pinned receipt path, not deletion.
     let sink = ManifestSink {
-        path: std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("v3-admission.json"),
+        path: std::env::var_os("V3_ADMISSION_MANIFEST").map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("v3-admission.json")),
         trace: trace.clone(),
     };
     fs_fixture::with_v3_contains(&plan, &mut fs, &sink, &trace, |snapshot| {
         let files = snapshot.files();
-        eprintln!("\n=== V3 Ground Truth: {} files ===\n", files.len());
+        eprintln!("\n=== V3 Ground Truth: {} admitted files ===\n", files.len());
         let t0 = std::time::Instant::now();
-        let handle = create_v3_index_observed(files, &trace);
+        let handle = create_v3_index_with_plan(files, &trace, &IndexBuildPlan::fresh_correctness());
         let index_time = t0.elapsed().as_secs_f64();
-        eprintln!("Index time: {:.1}s", index_time);
         trace.record(Event::Report);
         let mut report = std::fs::File::create(ground_truth_report()).unwrap();
-        writeln!(report, "V3 Ground Truth Report — {} files, indexed in {:.1}s\n", files.len(), index_time).ok();
-        let default_queries = fs_fixture::PANEL.iter().map(|&(value, strict)| {
-            if strict { GroundTruthQuery::strict(value) } else { GroundTruthQuery::relaxed(value) }
-        }).collect();
-        let queries = query_spec().unwrap_or(default_queries);
-        // Baseline still rereads for its oracle. No read-once claim before the fix.
-        run_panel(&handle, files, &queries, &mut report);
-    }).unwrap();
+        writeln!(report, "V3 Ground Truth Report — {} files, indexed in {:.1}s\n", files.len(), index_time).unwrap();
+        run_admitted_panel(&handle, snapshot, &mut report);
+    }).expect("corpus admission refused; no correctness comparison was run");
 }
 
 /// A relaxed fuzzy query must find an occurrence that straddles token
