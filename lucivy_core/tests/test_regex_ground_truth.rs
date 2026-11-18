@@ -29,45 +29,18 @@ fn brute_force_regex(files: &[(String, String)], pattern: &str) -> HashSet<usize
 
 fn collect_repo_files() -> Vec<(String, String)> {
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let exclude_dirs: Vec<&str> = vec![
-        "target", "node_modules", "__pycache__", ".venv",
-        ".pytest_cache", "pkg", ".git", "playground",
-    ];
-    let mut files = Vec::new();
-
-    fn walk(dir: &std::path::Path, exclude: &[&str], files: &mut Vec<(String, String)>, root: &std::path::Path) {
-        let entries = match std::fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(_) => return,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-            if path.is_dir() {
-                if !exclude.contains(&name.as_str()) {
-                    walk(&path, exclude, files, root);
-                }
-            } else if path.is_file() {
-                if let Ok(meta) = path.metadata() {
-                    if meta.len() > 100_000 { continue; }
-                }
-                let bytes = match std::fs::read(&path) {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                };
-                if bytes.contains(&0) { continue; }
-                let content = match String::from_utf8(bytes) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-                if content.trim().is_empty() { continue; }
-                let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
-                files.push((rel, content));
-            }
-        }
-    }
-
-    walk(&repo_root, &exclude_dirs, &mut files, &repo_root);
+    let walked = common::corpus::walk(&repo_root, &common::corpus::Rules {
+        exclude_dirs: &["target", "node_modules", "__pycache__", ".venv", ".pytest_cache", "pkg", ".git", "playground"],
+        extensions: None,
+        max_size: 100_000,
+        skip_zero_size: false,
+        skip_binary: true,
+        skip_blank: true,
+        max_files: usize::MAX,
+        relative: true,
+    });
+    eprintln!("{}", walked.report(&repo_root));
+    let files = walked.files;
     files
 }
 

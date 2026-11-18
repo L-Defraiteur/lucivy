@@ -25,26 +25,19 @@ use lucivy_core::query::{self, QueryConfig, SchemaConfig};
 fn corpus(max: usize) -> Vec<(String, String)> {
     let root = Path::new("/tmp/lucivy-cmp");
     let mut files = Vec::new();
-    fn walk(dir: &Path, files: &mut Vec<(String, String)>, max: usize) {
-        if files.len() >= max { return; }
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
-        let mut entries: Vec<_> = entries.flatten().collect();
-        entries.sort_by_key(|e| e.path());
-        for e in entries {
-            if files.len() >= max { return; }
-            let p = e.path();
-            if p.is_dir() { walk(&p, files, max); continue; }
-            let ok_ext = p.extension().and_then(|x| x.to_str()).is_some_and(|x| matches!(x, "c" | "h" | "rst" | "txt"));
-            if !ok_ext { continue; }
-            let Ok(meta) = e.metadata() else { continue };
-            if meta.len() == 0 || meta.len() > 60_000 { continue; }
-            if let Ok(text) = std::fs::read_to_string(&p) {
-                files.push((p.to_string_lossy().to_string(), text));
-            }
-        }
-    }
     if root.exists() {
-        walk(root, &mut files, max);
+        let walked = common::corpus::walk(root, &common::corpus::Rules {
+            exclude_dirs: &[],
+            extensions: Some(&["c", "h", "rst", "txt"]),
+            max_size: 60_000,
+            skip_zero_size: true,
+            skip_binary: false,
+            skip_blank: false,
+            max_files: max,
+            relative: false,
+        });
+        eprintln!("{}", walked.report(root));
+        files = walked.files;
     }
     if !common::usable("/tmp/lucivy-cmp", files.len(), 50, "a synthetic corpus") {
         let vocab = ["mutex_lock", "mutex_unlock", "spin_lock_irqsave", "sched_setscheduler", "printk", "schedule",
