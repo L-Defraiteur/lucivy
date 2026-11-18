@@ -1,5 +1,5 @@
-Lucivy 4.3.10 — unreleased
-==========================
+Lucivy 4.3.10 — 18 November 2026
+================================
 
 One fix and one warning; the index format is unchanged.
 
