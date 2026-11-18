@@ -102,35 +102,18 @@ fn collect_files(max_docs_arg: usize) -> Vec<(String, String)> {
         common::usable(&root_owned, 0, 1, "skipped, nothing is checked");
         return vec![];
     }
-    let exclude_dirs = ["target", "node_modules", ".git", "build", "__pycache__", "playground"];
-    let mut files = Vec::new();
-
-    fn walk(dir: &std::path::Path, root: &std::path::Path, exclude: &[&str],
-            files: &mut Vec<(String, String)>, max: usize) {
-        if files.len() >= max { return; }
-        let entries = match std::fs::read_dir(dir) { Ok(e) => e, Err(_) => return };
-        for entry in entries.flatten() {
-            if files.len() >= max { return; }
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-            if path.is_dir() {
-                if !exclude.contains(&name.as_str()) {
-                    walk(&path, root, exclude, files, max);
-                }
-            } else if path.is_file() {
-                let size = path.metadata().map(|m| m.len()).unwrap_or(0);
-                if size > MAX_FILE_SIZE || size == 0 { continue; }
-                let bytes = match std::fs::read(&path) { Ok(b) => b, Err(_) => continue };
-                if bytes.contains(&0) { continue; }
-                let content = match String::from_utf8(bytes) { Ok(s) => s, Err(_) => continue };
-                if content.trim().is_empty() { continue; }
-                let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
-                files.push((rel, content));
-            }
-        }
-    }
-    walk(root, root, &exclude_dirs, &mut files, max_docs);
-    files
+    let walked = common::corpus::walk(root, &common::corpus::Rules {
+        exclude_dirs: &["target", "node_modules", ".git", "build", "__pycache__", "playground"],
+        extensions: None,
+        max_size: MAX_FILE_SIZE,
+        skip_zero_size: true,
+        skip_binary: true,
+        skip_blank: true,
+        max_files: max_docs,
+        relative: true,
+    });
+    eprintln!("{}", walked.report(root));
+    walked.files
 }
 
 // ─── Index creation ───────────────────────────────────────────────────────

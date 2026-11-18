@@ -72,6 +72,7 @@ fn collect_repo_files() -> Vec<(String, String)> {
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
+            if common::corpus::is_secret(&name) { continue; }
             // Skip symlinks (tarball doesn't follow them)
             if path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
                 continue;

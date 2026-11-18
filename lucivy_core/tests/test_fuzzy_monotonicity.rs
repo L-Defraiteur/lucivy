@@ -52,6 +52,7 @@ fn walk(dir: &std::path::Path, exclude: &[&str], files: &mut Vec<(String, String
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
+        if common::corpus::is_secret(&name) { continue; }
         if path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) { continue; }
         if path.is_dir() {
             if !exclude.contains(&name.as_str()) { walk(&path, exclude, files, root); }
