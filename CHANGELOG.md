@@ -1,3 +1,27 @@
+Lucivy 4.3.10 — unreleased
+==========================
+
+One fix and one warning; the index format is unchanged.
+
+- **Fixed: one ulp of score between two indexes of the same documents.** A
+  union of clauses (`parse` of plain words, `boolean` of `should` clauses)
+  summed their scores in f32 in the order of its live clauses, and that order
+  moved: a clause that ran out was taken out by `swap_remove`, which put the
+  last clause in its place. Whether a clause runs out before a document
+  depends on what its segment holds, so the same document summed `w4 + w2 + w3`
+  in one index and `w2 + w3 + w4` in another. `SumCombiner`, the sum of
+  `DisjunctionMaxCombiner` and the pivot sum of `block_wand` now add in f64
+  and round once. Witness `test_parse_scores_identical_across_layouts` (41
+  documents in one segment or two, scores equal to the bit; 4 of 41 differed).
+- **`indexed: false` on a `text` or `string` field is reported**, not
+  silently ignored: `build_schema` prints one warning per such field, and
+  `lucivy_core::handle::schema_warnings(&SchemaConfig) -> Vec<String>` returns
+  them. These fields stay indexed. Tests `test_text_field_indexed_false`.
+- Ignored measurement test: `test_compare_two_indexes` gains
+  `LUCIVY_CMP_DETAIL` (the top 20 of both sides, each document marked as found
+  on both sides or one) and `LUCIVY_CMP_ONLY_OUT` (the ids of the documents
+  only one side holds).
+
 Lucivy 4.3.9 — 16 November 2026
 ================================
 

@@ -1,4 +1,4 @@
-# lucivy 4.3.9
+# lucivy 4.3.10
 
 [![PyPI](https://img.shields.io/pypi/v/lucivy?label=PyPI&color=blue)](https://pypi.org/project/lucivy/)
 [![npm](https://img.shields.io/npm/v/lucivy?label=npm&color=cb3837)](https://www.npmjs.com/package/lucivy)
@@ -30,6 +30,13 @@ lucivy's own source from GitHub and indexes it in your browser in a few seconds.
 tab. The second half is typed by hand — `index postgres`, then `--strict
 "heap_insert"`, `"CREATE INDEX CONCURRENTLY"` (27 hits, 11 ms), `--fuzzy 1
 "vaccum"` (17 ms) and `--regex "ExecInit[A-Z][a-zA-Z]+\("` (20 ms).*
+
+### What's new in 4.3.10
+
+A patch release with one fix and one warning. The index format is unchanged.
+
+- **The same documents get the same scores, to the bit, whatever segments they were written in.** A query that sums several clauses (a `parse` of plain words, a `boolean` of `should` clauses) added their scores in f32 in an order that depended on the segment layout, so two indexes of the same documents could differ by one ulp. The sum is now kept in f64 and rounded once.
+- **`indexed: false` on a `text` or `string` field is reported.** Those fields are always indexed; the option was silently ignored. Building the schema now prints a warning per such field, and `lucivy_core::handle::schema_warnings` returns the same warnings without creating an index. Indexing itself is unchanged.
 
 ### What's new in 4.3.9
 
@@ -208,7 +215,7 @@ A patch release that fixes concurrency between searches and writes. The index fo
   3.0.x does not open a 4.0 index; the first commit in 4.0 converts without
   return.
 - One version number for the whole workspace: `ld-lucivy`, `lucivy-core`,
-  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.3.9.
+  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.3.10.
 
 3.0.x brought SFX v3 (exact byte spans on every query mode), boolean syntax,
 Jaro-Winkler, query warnings, bring-your-own-storage in every binding, snapshots
