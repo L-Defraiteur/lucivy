@@ -1,8 +1,15 @@
-# lucivy 4.3.9
+# lucivy 4.3.10
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. From Python. Runs in your process, in your transaction (bring your own storage), and the same engine runs in the browser. Powered by Rust, MIT.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
+
+### What's new in 4.3.10
+
+A patch release with one fix and one warning. The index format is unchanged.
+
+- **The same documents get the same scores, to the bit, whatever segments they were written in.** A query that sums several clauses (a `parse` of plain words, a `boolean` of `should` clauses) added their scores in f32 in an order that depended on the segment layout, so two indexes of the same documents could differ by one ulp. The sum is now kept in f64 and rounded once.
+- **`indexed: false` on a `text` or `string` field is reported.** Those fields are always indexed; the option was silently ignored. Building the schema now prints a warning per such field, and `lucivy_core::handle::schema_warnings` returns the same warnings without creating an index. Indexing itself is unchanged.
 
 ### What's new in 4.3.9
 
@@ -157,7 +164,7 @@ Where a cell says "not with this analyzer", a purpose-built analyzer or plugin m
 ## Install
 
 ```bash
-pip install lucivy  # 4.3.9
+pip install lucivy  # 4.3.10
 ```
 
 ## Quick start
