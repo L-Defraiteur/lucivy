@@ -542,6 +542,12 @@ impl SegmentUpdaterState {
                 let uuid = meta.id().uuid_string();
                 let reader = crate::SegmentReader::open(&index.segment(meta))?;
                 let fields: Vec<crate::schema::Field> = reader.sfx_fields().collect();
+                if std::env::var_os("LUCIVY_DEBUG_COMPACTION").is_some() {
+                    let gmaps = fields.iter().filter(|f| reader.sfx_index_file("gmap", **f).is_some()).count();
+                    let schema_text = index.schema().fields().filter(|(_, e)| matches!(e.field_type(), crate::schema::FieldType::Str(_))).count();
+                    eprintln!("[debug-compaction] segment {} docs {} sfx_fields {} gmaps {} schema_text {} meta_sfx_ids {:?}",
+                        uuid, reader.max_doc(), fields.len(), gmaps, schema_text, reader.segment_id());
+                }
                 for field in fields {
                     let Some(file) = reader.sfx_index_file("gmap", field) else { continue };
                     let bytes = file.read_bytes()?;
