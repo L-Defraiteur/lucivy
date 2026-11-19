@@ -327,3 +327,61 @@ fn what_one_entry_per_content_would_weigh() {
         }
     }
 }
+
+/// **Measure, ignored: where the lost words of an index sit** (19 November 2026). `check_dictionary` names ids
+/// that live segments reference and no dictionary generation holds a text for. Ids are minted in order: this
+/// walk prints, per shard of `content`, the id range of each generation file on disk, the lost ids' range and
+/// spread over those ranges, and the segments that name them (documents, deletes).
+#[test]
+#[ignore]
+fn where_the_lost_words_sit() {
+    use ld_lucivy::suffix_fst::termtexts_v3::TermTextsReaderV3;
+    let path = std::env::var("LUCIVY_DICT_INDEX").expect("LUCIVY_DICT_INDEX=<a copy of a sharded index>");
+    let index = ShardedHandle::open(&path).unwrap();
+    let field = index.field("content").expect("content");
+    let fid = field.field_id();
+    let mut shard_id = 0;
+    while let Some(shard) = index.shard(shard_id) {
+        let dir = std::path::Path::new(&path).join(format!("shard_{shard_id}"));
+        shard_id += 1;
+        let dictionary = shard.index.sfx_dictionary().expect("dictionary");
+        let texts = dictionary.field(fid).expect("field").termtexts().expect("texts");
+        let held: HashSet<u32> = texts.iter().map(|e| e.0).collect();
+        println!("== shard {} : generations {:?}", shard_id - 1, dictionary.generations());
+        let mut ranges = Vec::new();
+        for g in dictionary.generations() {
+            let p = dir.join(format!("dict-{g}.{fid}.termtexts"));
+            let bytes = std::fs::read(&p).unwrap();
+            let r = TermTextsReaderV3::open(&bytes).expect("termtexts");
+            let ids: Vec<u32> = r.ids().collect();
+            let (lo, hi) = (ids.iter().min().copied().unwrap_or(0), ids.iter().max().copied().unwrap_or(0));
+            println!("  generation {g}: {} ids, {lo}..={hi}", ids.len());
+            ranges.push((*g, lo, hi));
+        }
+        for segment in shard.reader.searcher().segment_readers() {
+            let Some(file) = segment.sfx_index_file("gmap", field) else { continue };
+            let bytes = file.read_bytes().unwrap();
+            let gmap = GmapReader::open(bytes.as_slice()).expect("gmap");
+            let lost: Vec<u32> = gmap.iter().filter(|id| !held.contains(id)).collect();
+            if lost.is_empty() {
+                continue;
+            }
+            let mut by_gen: BTreeMap<String, usize> = BTreeMap::new();
+            for id in &lost {
+                let g = ranges.iter().find(|(_, lo, hi)| id >= lo && id <= hi).map(|(g, _, _)| g.to_string()).unwrap_or_else(|| "between generations".into());
+                *by_gen.entry(g).or_default() += 1;
+            }
+            println!(
+                "  segment {} ({} docs, {} deleted): {} lost ids, {}..={}, by generation range {:?}; first ten {:?}",
+                segment.segment_id().short_uuid_string(),
+                segment.max_doc(),
+                segment.num_deleted_docs(),
+                lost.len(),
+                lost.iter().min().unwrap(),
+                lost.iter().max().unwrap(),
+                by_gen,
+                &lost[..lost.len().min(10)]
+            );
+        }
+    }
+}
