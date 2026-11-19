@@ -1,3 +1,25 @@
+Lucivy 4.3.12 — 19 November 2026
+================================
+
+One fix; the index format is unchanged (an older lucivy reads a 4.3.12 index:
+the reprieve is one more generation to it).
+
+- **Fixed: the dictionary compaction could lose the words of a segment it did
+  not see.** `maintain` with `compact` rewrites a shard's dictionary over the
+  ids the committed segments' `.gmap`s cite. On rag3weaver's code index, each
+  nightly compaction left a few thousand ids cited by a recent segment with no
+  text in any generation: the documents holding those words no longer came
+  out for them, exact or fuzzy, and nothing said so. The dead texts now go to
+  a reprieve generation, read like the others, for one cycle; the next
+  compaction keeps those a `.gmap` cites again, writes each with the segment
+  that cites it to stderr and to the report (`DeadTextsReport::revived`), and
+  lets the others go. `check_dictionary` counts the cited ids held only by the
+  reprieve apart (`FieldCheck::in_reprieve`). A dead text now leaves at the
+  second compaction instead of the first. Witnesses
+  `test_failpoints_a_compaction_that_misses_a_segment_loses_no_word` (7 words
+  lost before) and `test_failpoints_a_dead_text_leaves_after_its_reprieve`.
+  Words lost before 4.3.12 come back only by rebuilding the index.
+
 Lucivy 4.3.11 — 19 November 2026
 ================================
 
