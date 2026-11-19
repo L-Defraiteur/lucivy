@@ -2,7 +2,13 @@
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. From C++. Runs in your process, in your transaction (`lucivy::BlobBackend`), and the same engine runs in the browser. Powered by Rust via a CXX bridge, MIT.
 
-Version 4.3.10 — the lucivy engine of the same number (SFX v3 suffix index, the shared dictionary by default).
+Version 4.3.11 — the lucivy engine of the same number (SFX v3 suffix index, the shared dictionary by default).
+
+### What's new in 4.3.11
+
+A patch release with one fix. The index format is unchanged.
+
+- **A long fuzzy query on an index without positions no longer reads every candidate value whole.** Such an index verifies its candidates on the stored text. A fuzzy query is cut into pieces, one of which every occurrence holds intact, and a short piece can be common: every value holding it went whole through the edit distance of a long needle. The distance now runs only around the occurrences of the pieces, with the same occurrences and spans: a 230-byte query at distance 1 went from 6.8 s to 0.19 s on 20 000 source files.
 
 ### What's new in 4.3.10
 
