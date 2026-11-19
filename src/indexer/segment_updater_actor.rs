@@ -524,6 +524,12 @@ impl SegmentUpdaterState {
         if all != committed.len() {
             return refuse(format!("{} uncommitted segment(s)", all - committed.len()));
         }
+        if std::env::var_os("LUCIVY_DEBUG_COMPACTION").is_some() {
+            let mut c: Vec<String> = committed.iter().map(|m| format!("{}:{}", &m.id().uuid_string()[..8], m.max_doc())).collect();
+            let mut e: Vec<String> = self.shared.segment_manager.segment_entries().iter().map(|x| format!("{}:{}", &x.meta().id().uuid_string()[..8], x.meta().max_doc())).collect();
+            c.sort(); e.sort();
+            eprintln!("[debug-compaction] committed {c:?} entries {e:?}");
+        }
         let fold = index.dictionary_fold().clone();
         if !fold.begin() {
             return refuse("a dictionary fold is running".into());
