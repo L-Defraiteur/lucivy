@@ -29,11 +29,26 @@ pub fn recipe(root: &str) -> String {
         "  git clone --depth=1 https://github.com/L-Defraiteur/rag3db.git {root}\n\
          \x20 or V3_CORPUS=/path/to/another/tree (the CI uses its own checkout: V3_CORPUS=.)"
     );
-    let source = if root.contains("lucivy-cmp") { kernel.to_string() } else { repo };
+    let luce = "  build it with the Python binding: create an index with a stored `content` field, add the\n\
+                \x20   lucivy sources, commit, drain_merges, then write `index.export_snapshot()` to playground/dataset.luce\n\
+                \x20   (lucivy docs/2-avril-2026-12h43/10-knowledge-dump-session-1-2-avril.md, « Build .luce »)";
+    let source = if root.contains("lucivy-cmp") { kernel.to_string() } else if root.ends_with(".luce") { luce.to_string() } else { repo };
     format!(
         "{source}\n  the playground corpora: python3 playground/tools/build_corpus.py all\n\
          \x20 or {ABSENT_OK}=1 to run without it (a synthetic corpus or a skip, said as such)"
     )
+}
+
+/// The root of the persisted indexes the diagnostics read (`bench_sharding` t01 writes them: `single`,
+/// `round_robin`, `token_aware`), from `LUCIVY_DIAG_INDEX`. A diagnostic is `#[ignore]` and run on purpose:
+/// without the variable it fails and says so, it does not pass on nothing. No path of one machine here.
+pub fn diag_index(sub: &str) -> String {
+    match std::env::var("LUCIVY_DIAG_INDEX") {
+        Ok(root) => format!("{root}/{sub}"),
+        Err(_) => panic!(
+            "LUCIVY_DIAG_INDEX=<the directory bench_sharding t01 writes> is needed: this diagnostic reads `{sub}` in it"
+        ),
+    }
 }
 
 /// `found` files were read under `root`, `min` are needed. `true`: go on with

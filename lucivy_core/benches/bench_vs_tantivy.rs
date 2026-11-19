@@ -22,10 +22,7 @@ use tantivy::query::{PhraseQuery as TvPhraseQuery, QueryParser as TvQueryParser,
 use tantivy::schema::{Schema as TvSchema, TEXT, STORED, IndexRecordOption as TvIndexRecordOption};
 use tantivy::{Index as TvIndex, Term as TvTerm, IndexWriter as TvIndexWriter, doc};
 
-const LINUX_CLONE: &str = "/home/luciedefraiteur/linux_bench";
-const BENCH_BASE: &str = "/home/luciedefraiteur/lucivy_bench_vs_tantivy";
 // Reuse existing lucivy indexes from the sharding bench
-const SHARDING_BENCH_BASE: &str = "/home/luciedefraiteur/lucivy_bench_sharding";
 const MAX_FILE_SIZE: u64 = 100_000;
 
 fn remove_locks(dir: &Path) {
@@ -301,19 +298,29 @@ fn avg3<F: FnMut() -> (usize, f64)>(mut f: F) -> (usize, f64) {
 
 // ─── Main bench ───────────────────────────────────────────────────────────
 
+/// A path of this bench, from the environment: no path of one machine in the code.
+fn env_path(name: &str, what: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| panic!("{name}=<{what}> is needed by this bench"))
+}
+
+/// Ignored: a bench, run on purpose with `BENCH_DATASET` (the corpus), `LUCIVY_BENCH_VS_TANTIVY_DIR` (where the
+/// tantivy index is written) and `LUCIVY_DIAG_INDEX` (the directory `bench_sharding` t01 writes).
 #[test]
+#[ignore]
 fn bench_vs_tantivy() {
+    let bench_base = env_path("LUCIVY_BENCH_VS_TANTIVY_DIR", "a directory for the tantivy index");
+    let sharding_bench_base = env_path("LUCIVY_DIAG_INDEX", "the directory bench_sharding t01 writes");
     let max_docs: usize = std::env::var("MAX_DOCS")
         .ok().and_then(|v| v.parse().ok())
         .unwrap_or(90_000);
 
-    let dataset = std::env::var("BENCH_DATASET").unwrap_or_else(|_| LINUX_CLONE.to_string());
+    let dataset = env_path("BENCH_DATASET", "the corpus to index, a source tree");
 
-    let tv_dir = format!("{BENCH_BASE}/tantivy");
+    let tv_dir = format!("{bench_base}/tantivy");
 
     // Reuse existing lucivy indexes from the sharding bench
-    let lv1_dir = format!("{SHARDING_BENCH_BASE}/single");
-    let lv4_dir = format!("{SHARDING_BENCH_BASE}/round_robin");
+    let lv1_dir = format!("{sharding_bench_base}/single");
+    let lv4_dir = format!("{sharding_bench_base}/round_robin");
 
     // ── Build tantivy index from same files (once, reuse on subsequent runs) ──
     if !Path::new(&tv_dir).exists() {
@@ -321,7 +328,7 @@ fn bench_vs_tantivy() {
         let files = collect_files(Path::new(&dataset), max_docs);
         let ndocs = files.len();
         eprintln!("Collected {} text files\n", ndocs);
-        if ndocs == 0 { eprintln!("No files. Skipping."); return; }
+        assert!(ndocs > 0, "no text file under {dataset}");
 
         eprintln!("=== Indexing: tantivy 0.25 ({} docs) ===", ndocs);
         let (_, tv_time) = index_tantivy(&files, &tv_dir);

@@ -1,11 +1,14 @@
 //! Check if "audioclock" has the suffix "lock" in the FST
 
+mod common;
+
+/// Ignored: reads the index `bench_sharding` t01 writes, under `LUCIVY_DIAG_INDEX`.
 #[test]
+#[ignore]
 fn check_audioclock_suffix() {
-    let shard_dir = "/home/luciedefraiteur/lucivy_bench_sharding/token_aware/shard_2";
-    if !std::path::Path::new(shard_dir).exists() {
-        eprintln!("Skipping"); return;
-    }
+    let shard_dir = common::diag_index("token_aware/shard_2");
+    let shard_dir = shard_dir.as_str();
+    assert!(std::path::Path::new(shard_dir).exists(), "no shard at {shard_dir}: run bench_sharding t01 first");
 
     let dir = lucivy_core::directory::StdFsDirectory::open(shard_dir).unwrap();
     let handle = lucivy_core::handle::LucivyHandle::open(dir).unwrap();

@@ -1,29 +1,23 @@
 //! Standalone diagnostics on a preserved bench index.
 //!
 //! Runs ground truth verification and SFX diagnostics on an existing index
-//! without re-indexing. Point BENCH_INDEX to the index directory.
+//! without re-indexing. Ignored: run on purpose, on the directory `bench_sharding` t01 writes.
 //!
 //! Usage:
-//!   cargo test -p lucivy-core --test test_diagnostics --release -- --nocapture
-//!   BENCH_INDEX=/path/to/index cargo test -p lucivy-core --test test_diagnostics --release -- --nocapture
+//!   LUCIVY_DIAG_INDEX=/path/to/bench cargo test -p lucivy-core --test test_diagnostics --release -- --ignored --nocapture
+
+mod common;
 
 use lucivy_core::handle::LucivyHandle;
 use lucivy_core::diagnostics;
 use lucivy_core::directory::StdFsDirectory;
 use ld_lucivy::Index;
 
-const DEFAULT_INDEX: &str = "/home/luciedefraiteur/lucivy_bench_sharding";
-
 #[test]
+#[ignore]
 fn verify_index() {
-    let base = std::env::var("BENCH_INDEX")
-        .unwrap_or_else(|_| DEFAULT_INDEX.to_string());
-
-    let shards_dir = format!("{}/round_robin", base);
-    if !std::path::Path::new(&shards_dir).exists() {
-        eprintln!("No index found at {}. Run the bench first.", shards_dir);
-        return;
-    }
+    let shards_dir = common::diag_index("round_robin");
+    assert!(std::path::Path::new(&shards_dir).exists(), "no index at {shards_dir}: run bench_sharding t01 first");
 
     // Find all shard directories
     let mut shard_dirs: Vec<String> = Vec::new();

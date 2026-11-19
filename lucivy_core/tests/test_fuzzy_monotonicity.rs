@@ -172,8 +172,7 @@ fn search_ranked(handle: &LucivyHandle, query_text: &str, distance: u8, limit: u
 #[test]
 fn test_monotonicity_real_repo() {
     let files = collect_repo_files();
-    if files.is_empty() {
-        eprintln!("SKIP: no repo files found");
+    if !common::usable("rag3db clone (common::rag3db_clone)", files.len(), 1, "skipped, nothing is checked") {
         return;
     }
     eprintln!("Collected {} files", files.len());
@@ -585,7 +584,11 @@ fn test_diag_miss_count() {
     );
     let content = match content {
         Ok(c) => c,
-        Err(_) => { eprintln!("SKIP: file not found"); return; }
+        Err(_) => {
+            // A missing file is a missing corpus: red with its recipe, or a skip said as such.
+            assert!(!common::usable("rag3db clone (test/c_api/query_result_test.cpp)", 0, 1, "skipped, nothing is checked"));
+            return;
+        }
     };
 
     let query_text = std::env::var("DIAG_QUERY")

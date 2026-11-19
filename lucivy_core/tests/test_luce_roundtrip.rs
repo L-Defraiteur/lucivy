@@ -27,8 +27,8 @@ fn test_luce_playground_search() {
     let luce_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../playground/dataset.luce");
 
-    if !luce_path.exists() {
-        eprintln!("Skipping: no playground/dataset.luce");
+    let found = usize::from(luce_path.exists());
+    if !common::usable(&luce_path.to_string_lossy(), found, 1, "skipped, nothing is checked") {
         return;
     }
 

@@ -5,17 +5,19 @@ use lucivy_core::sharded_handle::ShardedHandle;
 use lucivy_core::query::QueryConfig;
 use std::collections::HashSet;
 
-const BENCH_DIR: &str = "/home/luciedefraiteur/lucivy_bench_sharding/token_aware";
+mod common;
 
+/// The index `bench_sharding` t01 writes, under `LUCIVY_DIAG_INDEX`.
+fn bench_dir() -> String {
+    common::diag_index("token_aware")
+}
+
+/// Ignored: a diagnostic on a persisted index.
 #[test]
+#[ignore]
 fn diagnose_missing_function_docs() {
-    let handle = match ShardedHandle::open(BENCH_DIR) {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("Cannot open index: {} — run bench first", e);
-            return;
-        }
-    };
+    let bench = bench_dir();
+    let handle = ShardedHandle::open(&bench).unwrap_or_else(|e| panic!("cannot open {bench}: {e} — run bench_sharding t01 first"));
 
     let term = "function";
     eprintln!("=== Finding docs with {:?} in text but NOT in search ===\n", term);
@@ -55,7 +57,7 @@ fn diagnose_missing_function_docs() {
 
     // We can open each shard directory directly
     for shard_id in 0..handle.num_shards() {
-        let shard_dir = format!("{}/shard_{}", BENCH_DIR, shard_id);
+        let shard_dir = format!("{}/shard_{}", bench_dir(), shard_id);
         let dir = lucivy_core::directory::StdFsDirectory::open(&shard_dir).unwrap();
         let index = match ld_lucivy::Index::open(dir) {
             Ok(i) => i,
@@ -131,7 +133,7 @@ fn diagnose_missing_function_docs() {
 
     // Deep check: for first missing doc, inspect sfx directly
     eprintln!("\n=== Deep SFX inspection for shard_0 doc_298 ===");
-    let shard_dir = format!("{}/shard_0", BENCH_DIR);
+    let shard_dir = format!("{}/shard_0", bench_dir());
     let dir = lucivy_core::directory::StdFsDirectory::open(&shard_dir).unwrap();
     let index = ld_lucivy::Index::open(dir).unwrap();
     let reader = index.reader().unwrap();
