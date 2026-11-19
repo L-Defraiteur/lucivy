@@ -530,6 +530,8 @@ impl SegmentUpdaterState {
         }
         let result = (|| -> crate::Result<super::dictionary_commit::DeadTextsReport> {
             let mut live: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+            // Which segment cites what, to name the segment of a text revived from the reprieve.
+            let mut cited: Vec<(String, u32, Vec<u32>)> = Vec::new();
             for meta in committed {
                 // Test door: a compaction that does not see the committed segments (the lost words of
                 // 19 November 2026 came from a segment outside this view).
@@ -537,6 +539,7 @@ impl SegmentUpdaterState {
                 if fail::eval("compact_dictionary::hide_segments", |_| ()).is_some() {
                     continue;
                 }
+                let uuid = meta.id().uuid_string();
                 let reader = crate::SegmentReader::open(&index.segment(meta))?;
                 let fields: Vec<crate::schema::Field> = reader.sfx_fields().collect();
                 for field in fields {
@@ -545,13 +548,26 @@ impl SegmentUpdaterState {
                     let gmap = crate::suffix_fst::gmap::GmapReader::open(bytes.as_slice()).ok_or_else(||
                         crate::LucivyError::SystemError(format!("field {}: unreadable .gmap", field.field_id())))?;
                     live.entry(field.field_id()).or_default().extend(gmap.iter());
+                    let mut ids: Vec<u32> = gmap.iter().collect();
+                    ids.sort_unstable();
+                    cited.push((uuid.clone(), field.field_id(), ids));
                 }
             }
             for ids in live.values_mut() {
                 ids.sort_unstable();
                 ids.dedup();
             }
-            let report = super::dictionary_commit::compact_dead_texts(&index, &live)?;
+            let mut report = super::dictionary_commit::compact_dead_texts(&index, &live)?;
+            for line in report.revived.iter_mut() {
+                let mut words = line.split_whitespace().filter_map(|w| w.parse::<u32>().ok());
+                let (Some(field), Some(id)) = (words.next(), words.next()) else { continue };
+                let segments: Vec<&str> = cited.iter()
+                    .filter(|(_, f, ids)| *f == field && ids.binary_search(&id).is_ok())
+                    .map(|(uuid, _, _)| uuid.as_str())
+                    .collect();
+                line.push_str(&format!(", segment {}", segments.join(", segment ")));
+                eprintln!("[dictionary] compaction: a text in reprieve is cited again — {line}: the previous compaction did not see this segment");
+            }
             if report.generation.is_some() {
                 let meta = self.shared.load_meta();
                 self.shared.save_metas(meta.opstamp, meta.payload.clone())?;

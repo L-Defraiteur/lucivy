@@ -17,6 +17,7 @@
 use ld_lucivy::schema::{Field, FieldType};
 use ld_lucivy::suffix_fst::dictionary::DICTIONARY_SFX_VERSION;
 use ld_lucivy::suffix_fst::gmap::GmapReader;
+use ld_lucivy::Directory as _;
 
 use crate::handle::LucivyHandle;
 
@@ -30,6 +31,9 @@ pub struct FieldCheck {
     /// Of those, the ids no dictionary generation (nor pending pair) has a
     /// text or a meta for: words lost.
     pub unknown: u64,
+    /// Of those, the ids held only by the reprieve generation (19 November 2026): known, still read, and kept
+    /// for good by the next compaction — a segment the last compaction did not see.
+    pub in_reprieve: u64,
 }
 
 /// The result of [`LucivyHandle::check_dictionary`] or
@@ -105,7 +109,14 @@ impl LucivyHandle {
             .collect();
         let mut fields = Vec::new();
         for (name, field) in text_fields {
-            let mut check = FieldCheck { field: format!("{prefix}{name}"), referenced: 0, unknown: 0 };
+            let mut check = FieldCheck { field: format!("{prefix}{name}"), referenced: 0, unknown: 0, in_reprieve: 0 };
+            let reprieved: std::collections::HashSet<u32> = self.index.sfx_dictionary()
+                .and_then(|d| d.meta().reprieve_generation.filter(|g| d.meta().generations.contains(g)))
+                .and_then(|g| self.index.directory().open_read(std::path::Path::new(
+                    &ld_lucivy::suffix_fst::dictionary::dictionary_file_name(g, field.field_id(), "termtexts"))).ok())
+                .and_then(|f| f.read_bytes().ok())
+                .map(|b| ld_lucivy::suffix_fst::termtexts_v3::TermTextsReaderV3::open(b.as_slice()).map(|r| r.ids().collect()).unwrap_or_default())
+                .unwrap_or_default();
             for segment in searcher.segment_readers() {
                 let Some(file) = segment.sfx_index_file("gmap", field) else { continue };
                 let bytes = file.read_bytes()
@@ -119,6 +130,8 @@ impl LucivyHandle {
                         .is_some_and(|t| t.text(global).is_some() && t.meta(global).is_some());
                     if !known {
                         check.unknown += 1;
+                    } else if reprieved.contains(&global) {
+                        check.in_reprieve += 1;
                     }
                 }
             }
