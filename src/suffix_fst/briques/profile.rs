@@ -161,6 +161,8 @@ pub struct Counters {
     pub ns_anch_back: AtomicU64,
     /// Memo cell lookups.
     pub n_memo_lookups: AtomicU64,
+    /// Bytes of stored text an index without positions ran through the edit distance (`briques::stored`).
+    pub n_stored_dp_bytes: AtomicU64,
 }
 
 fn counters() -> &'static Counters {
@@ -256,9 +258,16 @@ pub fn reset() {
         &c.n_cut_items, &c.n_cut_kept, &c.ns_cut,
         &c.n_sib_steps, &c.n_sib_visited, &c.ns_sib_lookup, &c.ns_sib_text,
         &c.ns_anch_fst, &c.ns_anch_resolve, &c.ns_anch_back, &c.n_memo_lookups,
+        &c.n_stored_dp_bytes,
     ] {
         a.store(0, Ordering::Relaxed);
     }
+}
+
+/// Bytes of stored text the fuzzy verification of an index without positions ran through the edit
+/// distance since [`reset`] (0 when profiling is off).
+pub fn stored_dp_bytes() -> u64 {
+    counters().n_stored_dp_bytes.load(Ordering::Relaxed)
 }
 
 /// Human-readable report of everything accumulated since [`reset`].
