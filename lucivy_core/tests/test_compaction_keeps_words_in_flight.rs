@@ -152,3 +152,75 @@ fn a_word_minted_by_a_document_deleted_before_its_commit_is_not_lost() {
     assert_eq!(lost, 0, "no word lost: {check:?}");
     assert_eq!(found(&index, "freshword"), vec![11], "the second version is found by its word");
 }
+
+/// **The host's pattern, harder** (19 November 2026): four shards; one thread rewrites files (delete the old
+/// version, add the new one, a commit every few files) for 20 seconds; another runs the nightly maintenance in a
+/// loop — purge of a few orphans, then `compact` — as often as it can. No word may be lost.
+#[test]
+#[ignore]
+fn the_host_pattern_under_repeated_maintenance_loses_no_word() {
+    let dir = common::scratch("compaction-host-pattern");
+    let config: SchemaConfig = serde_json::from_value(serde_json::json!({
+        "fields": [{ "name": "content", "type": "text" }, { "name": "name", "type": "text" }],
+        "shards": 4
+    }))
+    .unwrap();
+    let index = std::sync::Arc::new(ShardedHandle::create(dir.path().to_str().unwrap(), &config).unwrap());
+    let files = 400u64;
+    let text = |f: u64, v: u64| {
+        format!(
+            "pub fn file{f}_v{v}() {{ let word{}x{} = call_{}(arg{}); }} // note{} shared",
+            f % 53, v % 7, (f * 13 + v) % 211, v, (f + v * 3) % 389
+        )
+    };
+    let node = |f: u64, v: u64| f * 100_000 + v;
+    for f in 0..files {
+        index.add_document_json(node(f, 0), &serde_json::json!({ "content": text(f, 0), "name": format!("file{f}") })).unwrap();
+    }
+    index.commit().unwrap();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let orphans = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+    let maintenance = {
+        let (index, stop, orphans) = (index.clone(), stop.clone(), orphans.clone());
+        std::thread::spawn(move || {
+            let (mut runs, mut refused) = (0u32, 0u32);
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let purge: Vec<u64> = std::mem::take(&mut *orphans.lock().unwrap());
+                match index.maintain(&MaintenanceRequest { purge_node_ids: purge, compact: true, max_purge_ratio: 1.0, ..Default::default() }) {
+                    Ok(_) => runs += 1,
+                    Err(_) => refused += 1,
+                }
+            }
+            (runs, refused)
+        })
+    };
+    let mut version = vec![0u64; files as usize];
+    let started = std::time::Instant::now();
+    let mut round = 0u64;
+    while started.elapsed() < std::time::Duration::from_secs(20) {
+        round += 1;
+        let f = (round * 7919) % files;
+        let v = version[f as usize];
+        index.delete_by_node_id(node(f, v)).unwrap();
+        index.add_document_json(node(f, v + 1), &serde_json::json!({ "content": text(f, v + 1), "name": format!("file{f}") })).unwrap();
+        version[f as usize] = v + 1;
+        if round % 5 == 0 {
+            // An orphan: a document added then left for the maintenance to purge.
+            let o = 90_000_000 + round;
+            index.add_document_json(o, &serde_json::json!({ "content": format!("orphan{round} {}", text(f, v)) })).unwrap();
+            orphans.lock().unwrap().push(o);
+        }
+        if round % 7 == 0 {
+            index.commit().unwrap();
+        }
+    }
+    index.commit().unwrap();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (runs, refused) = maintenance.join().unwrap();
+    index.wait_merges_quiet().unwrap();
+    let check = index.check_dictionary().unwrap();
+    let lost: u64 = check.fields.iter().map(|f| f.unknown).sum();
+    eprintln!("rounds {round}; maintenance: {runs} run(s), {refused} refused; check: {check:?}");
+    assert!(runs >= 5, "the maintenance ran several times while the files were rewritten");
+    assert_eq!(lost, 0, "no word lost: {check:?}");
+}
