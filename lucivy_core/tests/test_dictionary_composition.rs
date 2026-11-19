@@ -385,3 +385,62 @@ fn where_the_lost_words_sit() {
         }
     }
 }
+
+/// **Measure, ignored: does a compaction on a quiet copy lose words?** (19 November 2026). The lost words of the
+/// code base appear after each nightly compaction (16 November 03:30, 19 November 09:09), just below the compacted
+/// generation's last id, cited by a recent segment of ~1 000 documents. Here the compaction runs alone on a copy:
+/// `check_dictionary` before, `maintain` with `compact` and nothing to purge, `check_dictionary` after; the ids
+/// lost by this compaction are listed with the segments that cite them. **It writes the copy.**
+#[test]
+#[ignore]
+fn a_compaction_on_a_quiet_copy_loses_no_word() {
+    use lucivy_core::maintenance::MaintenanceRequest;
+    let path = std::env::var("LUCIVY_DICT_INDEX").expect("LUCIVY_DICT_INDEX=<a copy of a sharded index — it is written>");
+    let index = ShardedHandle::open(&path).unwrap();
+    let field = index.field("content").expect("content");
+    let fid = field.field_id();
+    let lost_ids = |index: &ShardedHandle| -> Vec<(usize, String, u32, u32, Vec<u32>)> {
+        let mut out = Vec::new();
+        let mut s = 0;
+        while let Some(shard) = index.shard(s) {
+            let dictionary = shard.index.sfx_dictionary().expect("dictionary");
+            let texts = dictionary.field(fid).expect("field").termtexts().expect("texts");
+            let held: HashSet<u32> = texts.iter().map(|e| e.0).collect();
+            for segment in shard.reader.searcher().segment_readers() {
+                let Some(file) = segment.sfx_index_file("gmap", field) else {
+                    out.push((s, format!("{} NO GMAP", segment.segment_id().short_uuid_string()), segment.max_doc(), segment.num_deleted_docs(), vec![]));
+                    continue;
+                };
+                let bytes = file.read_bytes().unwrap();
+                let lost: Vec<u32> = GmapReader::open(bytes.as_slice()).expect("gmap").iter().filter(|id| !held.contains(id)).collect();
+                out.push((s, segment.segment_id().short_uuid_string(), segment.max_doc(), segment.num_deleted_docs(), lost));
+            }
+            s += 1;
+        }
+        out
+    };
+    let before = lost_ids(&index);
+    let before_set: HashSet<(usize, u32)> = before.iter().flat_map(|(s, _, _, _, l)| l.iter().map(move |id| (*s, *id))).collect();
+    println!("before: {} lost ids of content; segments:", before_set.len());
+    for (s, seg, docs, del, lost) in &before {
+        println!("  shard {s} segment {seg}: {docs} docs, {del} deleted, {} lost", lost.len());
+    }
+    let report = index.maintain(&MaintenanceRequest { compact: true, ..Default::default() }).unwrap();
+    println!("maintain: dictionary texts {:?}, merge rounds {}", report.dictionary_texts, report.merge_rounds);
+    drop(index);
+    let index = ShardedHandle::open(&path).unwrap();
+    let after = lost_ids(&index);
+    let mut new_lost = 0;
+    println!("after:");
+    for (s, seg, docs, del, lost) in &after {
+        let fresh: Vec<u32> = lost.iter().copied().filter(|id| !before_set.contains(&(*s, *id))).collect();
+        new_lost += fresh.len();
+        println!(
+            "  shard {s} segment {seg}: {docs} docs, {del} deleted, {} lost, {} new; first new {:?}",
+            lost.len(),
+            fresh.len(),
+            &fresh[..fresh.len().min(10)]
+        );
+    }
+    assert_eq!(new_lost, 0, "the compaction lost {new_lost} words of content");
+}
