@@ -204,3 +204,126 @@ fn walkdir(root: &str) -> Vec<std::path::PathBuf> {
     out.sort();
     out
 }
+
+/// **Measure, ignored: what one entry per content would weigh** (19 November 2026, lever 1 of
+/// `docs/lucivy/19-11-2026/05-ce-que-tient-le-dictionnaire.md` in rag3db). Nothing in the format changes: the
+/// walk splits the seven entries per content into what case, the separator and the borrowed bytes add, then
+/// builds beside the index, in memory, the `.sfx` and `.termtexts` of each shard's entries as they are (to check
+/// the builder against the files on disk) and of one entry per (half, content) and per (half, lowercased
+/// content). It also runs `check_dictionary` and counts the ids the live segments name that the texts lack.
+#[test]
+#[ignore]
+fn what_one_entry_per_content_would_weigh() {
+    use ld_lucivy::suffix_fst::dictionary_compact::generation_sfx_bytes;
+    use ld_lucivy::suffix_fst::termtexts_v3::{TermMetaV3, TermTextsWriterV3};
+    use std::time::Instant;
+
+    let path = std::env::var("LUCIVY_DICT_INDEX").expect("LUCIVY_DICT_INDEX=<a copy of a sharded index>");
+    let index = ShardedHandle::open(&path).unwrap();
+    match index.check_dictionary() {
+        Ok(check) => println!("check_dictionary: {check:?}"),
+        Err(e) => println!("check_dictionary: error {e}"),
+    }
+    let build = |entries: &[(u32, String, TermMetaV3)]| -> (usize, usize, f64) {
+        let t = Instant::now();
+        let sfx = generation_sfx_bytes(entries).expect("the suffix FST");
+        let mut texts = TermTextsWriterV3::new().with_ids(entries.iter().map(|e| e.0).collect());
+        for (i, (_, text, m)) in entries.iter().enumerate() {
+            texts.add(i as u32, text, *m);
+        }
+        let texts = texts.serialize();
+        (sfx.len(), texts.len(), t.elapsed().as_secs_f64())
+    };
+    let fields: Vec<(String, ld_lucivy::schema::Field)> =
+        index.field_map.iter().filter(|(name, _)| !name.starts_with('_')).cloned().collect();
+    for (name, field) in &fields {
+        let fid = field.field_id();
+        let mut sums: BTreeMap<&str, (u64, u64, u64, f64)> = BTreeMap::new();
+        let mut keys: BTreeMap<&str, u64> = BTreeMap::new();
+        let mut shard_id = 0;
+        let mut any = false;
+        while let Some(shard) = index.shard(shard_id) {
+            shard_id += 1;
+            let Some(dictionary) = shard.index.sfx_dictionary() else { continue };
+            let Some(dict_field) = dictionary.field(fid) else { continue };
+            any = true;
+            let texts = dict_field.termtexts().expect("the term texts");
+            let mut named: HashSet<u32> = HashSet::new();
+            for segment in shard.reader.searcher().segment_readers() {
+                if let Some(file) = segment.sfx_index_file("gmap", *field) {
+                    let bytes = file.read_bytes().unwrap();
+                    named.extend(GmapReader::open(bytes.as_slice()).expect("gmap").iter());
+                }
+            }
+            let mut entries: Vec<(u32, String, TermMetaV3)> = texts.iter().map(|(id, t, m)| (id, t.to_string(), m)).collect();
+            entries.sort_by_key(|e| e.0);
+            let held: HashSet<u32> = entries.iter().map(|e| e.0).collect();
+            let missing = named.iter().filter(|id| !held.contains(id)).count();
+            let max_held = entries.last().map(|e| e.0).unwrap_or(0);
+            let above = named.iter().filter(|id| **id > max_held).count();
+            println!("  {name} shard {}: {} ids named by live segments and absent from the texts ({} of them above the last id held, {max_held})",
+                shard_id - 1, missing, above);
+            // The four keys.
+            let content_of = |t: &str, m: &TermMetaV3, with_sep: bool| -> String {
+                let own = (m.own_len as usize).min(t.len());
+                let end = if with_sep { own } else { own.saturating_sub(m.sep_len as usize) };
+                t.get(..end).unwrap_or(t).to_string()
+            };
+            let mut k_text: HashSet<(bool, String)> = HashSet::new();
+            let mut k_sep: HashSet<(bool, String)> = HashSet::new();
+            let mut k_case: HashSet<(bool, String)> = HashSet::new();
+            let mut k_lower: HashSet<(bool, String)> = HashSet::new();
+            for (_, t, m) in &entries {
+                k_text.insert((m.is_word_stripped, t.clone()));
+                k_sep.insert((m.is_word_stripped, content_of(t, m, true)));
+                k_case.insert((m.is_word_stripped, content_of(t, m, false)));
+                k_lower.insert((m.is_word_stripped, content_of(t, m, false).to_lowercase()));
+            }
+            *keys.entry("1 entries").or_default() += entries.len() as u64;
+            *keys.entry("2 distinct extended texts").or_default() += k_text.len() as u64;
+            *keys.entry("3 content + separator").or_default() += k_sep.len() as u64;
+            *keys.entry("4 content, case kept").or_default() += k_case.len() as u64;
+            *keys.entry("5 content, lowercased").or_default() += k_lower.len() as u64;
+            // The builds.
+            let one_per = |set: &HashSet<(bool, String)>| -> Vec<(u32, String, TermMetaV3)> {
+                let mut v: Vec<&(bool, String)> = set.iter().collect();
+                v.sort();
+                v.into_iter()
+                    .enumerate()
+                    .map(|(i, (stripped, c))| {
+                        let len = c.len().min(u16::MAX as usize) as u16;
+                        (i as u32, c.clone(), TermMetaV3 { own_len: len, sep_len: 0, overlap_len: 0, is_word_start: true, is_word_stripped: *stripped })
+                    })
+                    .collect()
+            };
+            for (label, list) in [
+                ("as they are", entries.clone()),
+                ("one per content, case kept", one_per(&k_case)),
+                ("one per lowercased content", one_per(&k_lower)),
+            ] {
+                let (sfx, tt, secs) = build(&list);
+                let s = sums.entry(label).or_default();
+                s.0 += list.len() as u64;
+                s.1 += sfx as u64;
+                s.2 += tt as u64;
+                s.3 += secs;
+            }
+        }
+        if !any {
+            continue;
+        }
+        println!("== field {name} (id {fid})");
+        let entries = keys["1 entries"];
+        for (k, n) in &keys {
+            println!("  {k:<28} {n:>10}  (entries ÷ {:.2})", entries as f64 / (*n).max(1) as f64);
+        }
+        for (label, (n, sfx, tt, secs)) in &sums {
+            println!(
+                "  built {label:<28} {n:>10} entries: .sfx {:>7.1} MB, .termtexts {:>6.1} MB, {:>6.1} s",
+                *sfx as f64 / 1e6,
+                *tt as f64 / 1e6,
+                secs
+            );
+        }
+    }
+}
