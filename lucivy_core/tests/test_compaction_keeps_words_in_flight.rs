@@ -126,3 +126,29 @@ fn rewriting_files_while_the_maintenance_compacts_loses_no_word() {
         assert_eq!(found(&index, &format!("version{v}x{f}")), vec![node(f, v)], "the last version of file {f} is found");
     }
 }
+
+/// **A word minted by a document deleted before its commit is not handed to the next one** (19 November 2026).
+/// A new word enters the shard dictionary's pending table when a document mints it; the table forgets it once a
+/// commit names the segment's texts as a pending part. A document deleted before the commit leaves a segment
+/// with no live document, so no texts are named, and the commit returned before forgetting: the next document
+/// with the same word took the id from the pending table, unverified, and its segment cites an id no generation
+/// holds — the re-index of a file, added, deleted and added again within a commit.
+#[test]
+fn a_word_minted_by_a_document_deleted_before_its_commit_is_not_lost() {
+    let dir = common::scratch("minted-then-deleted");
+    let index = ShardedHandle::create(dir.path().to_str().unwrap(), &config()).unwrap();
+    index.add_document_json(1, &serde_json::json!({ "content": "base words" })).unwrap();
+    index.commit().unwrap();
+    // A first version, deleted before any commit.
+    index.add_document_json(10, &serde_json::json!({ "content": "fn freshword alpha" })).unwrap();
+    index.delete_by_node_id(10).unwrap();
+    index.commit().unwrap();
+    // The file again, with the same new word.
+    index.add_document_json(11, &serde_json::json!({ "content": "fn freshword beta" })).unwrap();
+    index.commit().unwrap();
+    index.wait_merges_quiet().unwrap();
+    let check = index.check_dictionary().unwrap();
+    let lost: u64 = check.fields.iter().map(|f| f.unknown).sum();
+    assert_eq!(lost, 0, "no word lost: {check:?}");
+    assert_eq!(found(&index, "freshword"), vec![11], "the second version is found by its word");
+}
