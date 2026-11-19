@@ -30,7 +30,7 @@ fn verify_index() {
         }
     }
 
-    eprintln!("=== Index verification: {} shards at {} ===\n", shard_dirs.len(), base);
+    eprintln!("=== Index verification: {} shards at {} ===\n", shard_dirs.len(), shards_dir);
 
     let terms_to_check = vec!["mutex", "lock", "function", "printk", "sched", "struct"];
 
