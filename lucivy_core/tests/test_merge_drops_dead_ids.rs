@@ -125,6 +125,8 @@ fn maintain_gives_back_the_dictionary_of_deleted_documents() {
     let before: Vec<_> = ["shared", "uniq2x", "tail4", "words here"].iter().map(|w| answers(&purged, w)).collect();
     let orphans: Vec<u64> = (0..400).filter(|i| i % 2 == 1).collect();
     let report = purged.maintain(&MaintenanceRequest { purge_node_ids: orphans.clone(), compact: true, ..Default::default() }).unwrap();
+    // The first compaction keeps the dead texts one cycle in reprieve (19 November 2026); the second lets them go.
+    purged.maintain(&MaintenanceRequest { compact: true, ..Default::default() }).unwrap();
 
     let fresh = ShardedHandle::create(fresh_dir.path().to_str().unwrap(), &config()).unwrap();
     for i in (0..400u64).filter(|i| i % 2 == 0) {
