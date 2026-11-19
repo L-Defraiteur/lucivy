@@ -76,15 +76,31 @@ impl Message for SuDeadTextsReply {
     fn type_tag() -> u64 { type_tag_hash(b"SuDeadTextsReply") }
     fn encode(&self) -> Vec<u8> {
         let r = &self.0;
-        [r.generation.map_or(0, |g| g + 1), r.texts_before, r.texts_after, r.bytes_before, r.bytes_after]
-            .iter().flat_map(|v| v.to_le_bytes()).collect()
+        let mut out: Vec<u8> = [r.generation.map_or(0, |g| g + 1), r.texts_before, r.texts_after, r.bytes_before, r.bytes_after,
+            r.reprieved, r.revived.len() as u64]
+            .iter().flat_map(|v| v.to_le_bytes()).collect();
+        for line in &r.revived {
+            out.extend((line.len() as u64).to_le_bytes());
+            out.extend(line.as_bytes());
+        }
+        out
     }
     fn decode(bytes: &[u8]) -> Result<Self, String> {
-        if bytes.len() < 40 { return Err("too short".into()); }
+        if bytes.len() < 56 { return Err("too short".into()); }
         let v = |i: usize| u64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap());
+        let mut revived = Vec::new();
+        let mut at = 56;
+        for _ in 0..v(6) {
+            let len = bytes.get(at..at + 8).ok_or("truncated revived")?;
+            let len = u64::from_le_bytes(len.try_into().unwrap()) as usize;
+            let text = bytes.get(at + 8..at + 8 + len).ok_or("truncated revived")?;
+            revived.push(String::from_utf8(text.to_vec()).map_err(|e| e.to_string())?);
+            at += 8 + len;
+        }
         Ok(Self(super::dictionary_commit::DeadTextsReport {
             generation: v(0).checked_sub(1),
             texts_before: v(1), texts_after: v(2), bytes_before: v(3), bytes_after: v(4),
+            reprieved: v(5), revived,
         }))
     }
 }
