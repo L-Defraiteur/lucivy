@@ -1,3 +1,21 @@
+Lucivy 4.3.11 — 19 November 2026
+================================
+
+One fix; the index format is unchanged.
+
+- **Fixed: a long fuzzy query on an index without positions read every
+  candidate value whole.** An index without positions verifies its
+  candidates on the stored text. A fuzzy query is cut into `d + 1` pieces
+  (one of them is intact in every occurrence), and the cheapest cut is often
+  a short piece: `ledic | …` for a 230-byte query, held by a third of the
+  documents of a code index, each of them run whole through the edit distance
+  of a needle too long to be bit-parallel — 23 MB and 6.5 s per segment, for
+  no hit. The distance now runs only in windows around the occurrences of the
+  pieces (`briques::stored::piece_windows`), wide enough for every end offset
+  to keep the distance the whole value gives: the same occurrences, the same
+  spans. 6.8 s → 0.19 s on 20 000 files. Witness
+  `test_no_positions_long_fuzzy`; measurement `test_no_positions_queries`.
+
 Lucivy 4.3.10 — 18 November 2026
 ================================
 

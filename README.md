@@ -1,4 +1,4 @@
-# lucivy 4.3.10
+# lucivy 4.3.11
 
 [![PyPI](https://img.shields.io/pypi/v/lucivy?label=PyPI&color=blue)](https://pypi.org/project/lucivy/)
 [![npm](https://img.shields.io/npm/v/lucivy?label=npm&color=cb3837)](https://www.npmjs.com/package/lucivy)
@@ -30,6 +30,12 @@ lucivy's own source from GitHub and indexes it in your browser in a few seconds.
 tab. The second half is typed by hand — `index postgres`, then `--strict
 "heap_insert"`, `"CREATE INDEX CONCURRENTLY"` (27 hits, 11 ms), `--fuzzy 1
 "vaccum"` (17 ms) and `--regex "ExecInit[A-Z][a-zA-Z]+\("` (20 ms).*
+
+### What's new in 4.3.11
+
+A patch release with one fix. The index format is unchanged.
+
+- **A long fuzzy query on an index without positions no longer reads every candidate value whole.** Such an index verifies its candidates on the stored text. A fuzzy query is cut into pieces, one of which every occurrence holds intact, and a short piece can be common: every value holding it went whole through the edit distance of a long needle. The distance now runs only around the occurrences of the pieces, with the same occurrences and spans: a 230-byte query at distance 1 went from 6.8 s to 0.19 s on 20 000 source files.
 
 ### What's new in 4.3.10
 
@@ -215,7 +221,7 @@ A patch release that fixes concurrency between searches and writes. The index fo
   3.0.x does not open a 4.0 index; the first commit in 4.0 converts without
   return.
 - One version number for the whole workspace: `ld-lucivy`, `lucivy-core`,
-  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.3.10.
+  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.3.11.
 
 3.0.x brought SFX v3 (exact byte spans on every query mode), boolean syntax,
 Jaro-Winkler, query warnings, bring-your-own-storage in every binding, snapshots

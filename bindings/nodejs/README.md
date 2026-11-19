@@ -1,8 +1,14 @@
-# lucivy 4.3.10
+# lucivy 4.3.11
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. From Node.js. Runs in your process, in your transaction (bring your own storage), and the same engine runs in the browser. Powered by Rust via napi-rs, MIT.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
+
+### What's new in 4.3.11
+
+A patch release with one fix. The index format is unchanged.
+
+- **A long fuzzy query on an index without positions no longer reads every candidate value whole.** Such an index verifies its candidates on the stored text. A fuzzy query is cut into pieces, one of which every occurrence holds intact, and a short piece can be common: every value holding it went whole through the edit distance of a long needle. The distance now runs only around the occurrences of the pieces, with the same occurrences and spans: a 230-byte query at distance 1 went from 6.8 s to 0.19 s on 20 000 source files.
 
 ### What's new in 4.3.10
 
@@ -159,7 +165,7 @@ Still there from 2.x: SFX-only engine, distributed search (`exportStats` / `merg
 ## Install
 
 ```bash
-npm install lucivy   # 4.3.10
+npm install lucivy   # 4.3.11
 ```
 
 ## Quick start
