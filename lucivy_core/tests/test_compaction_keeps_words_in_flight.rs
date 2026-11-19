@@ -67,6 +67,16 @@ fn a_compaction_keeps_the_words_a_pending_document_reuses() {
 /// does not take.
 #[test]
 fn rewriting_files_while_the_maintenance_compacts_loses_no_word() {
+    // Diagnostic branch: the engine says, per compaction, the segments it sees; five rounds, for the CI runners
+    // where the race shows (19 November 2026).
+    std::env::set_var("LUCIVY_DEBUG_COMPACTION", "1");
+    for round in 0..5 {
+        eprintln!("[debug-compaction] ===== round {round}");
+        rewriting_files_once();
+    }
+}
+
+fn rewriting_files_once() {
     let dir = common::scratch("compaction-stress");
     let index = std::sync::Arc::new(ShardedHandle::create(dir.path().to_str().unwrap(), &config()).unwrap());
     let files = 60u64;
