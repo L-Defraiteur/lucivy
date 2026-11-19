@@ -123,6 +123,14 @@ fn test_fail_on_commit_segment() -> ld_lucivy::Result<()> {
     Ok(())
 }
 
+/// A RAM index with a shard dictionary (`sfx_version` 4): `create_in_ram` alone has none.
+fn dictionary_index(schema: Schema) -> Index {
+    let settings = ld_lucivy::IndexSettings { sfx_version: 4, ..Default::default() };
+    let index = ld_lucivy::IndexBuilder::new().schema(schema).settings(settings).create_in_ram().unwrap();
+    assert!(index.sfx_dictionary().is_some(), "a dictionary index");
+    index
+}
+
 /// Ids that the live segments' `.gmap`s cite and no live dictionary generation holds a text for: words lost.
 fn lost_words(index: &Index) -> usize {
     use ld_lucivy::suffix_fst::gmap::GmapReader;
@@ -155,8 +163,7 @@ fn test_failpoints_a_compaction_that_misses_a_segment_loses_no_word() -> ld_luci
     let _scenario = fail::FailScenario::setup();
     let mut schema_builder = Schema::builder();
     let text_field = schema_builder.add_text_field("text", TEXT);
-    let index = Index::create_in_ram(schema_builder.build());
-    assert!(index.sfx_dictionary().is_some(), "a dictionary index by default");
+    let index = dictionary_index(schema_builder.build());
     let mut index_writer: IndexWriter = index.writer_with_num_threads(1, 15_000_000)?;
     index_writer.add_document(doc!(text_field => "fn seenword alpha"))?;
     index_writer.commit()?;
@@ -185,7 +192,7 @@ fn test_failpoints_a_dead_text_leaves_after_its_reprieve() -> ld_lucivy::Result<
     let _scenario = fail::FailScenario::setup();
     let mut schema_builder = Schema::builder();
     let text_field = schema_builder.add_text_field("text", TEXT);
-    let index = Index::create_in_ram(schema_builder.build());
+    let index = dictionary_index(schema_builder.build());
     let mut index_writer: IndexWriter = index.writer_with_num_threads(1, 15_000_000)?;
     index_writer.add_document(doc!(text_field => "fn keptword alpha"))?;
     index_writer.add_document(doc!(text_field => "fn deadword gamma"))?;
