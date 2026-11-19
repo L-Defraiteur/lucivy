@@ -16,6 +16,8 @@ crate-type = ["lib"]
 [features]
 default = ["mmap"]
 mmap = ["ld-lucivy/mmap"]
+# Test doors of the engine (`ld-lucivy/failpoints`), for `tests/test_failpoints.rs`.
+failpoints = ["ld-lucivy/failpoints", "dep:fail", "fail/failpoints"]
 
 [dependencies]
 ld-lucivy = { version = "4.3.11", path = "..", default-features = false, features = [
@@ -26,6 +28,7 @@ luciole = { version = "4.3.11", path = "../luciole" }
 lucistore = { version = "4.3.11", path = "../lucistore" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+fail = { version = "0.5.0", optional = true }
 regex = "1"
 regex-syntax = "0.8"
 

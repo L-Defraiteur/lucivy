@@ -46,6 +46,10 @@ pub struct MaintenanceReport {
     /// Texts of the shard dictionaries before and after their compaction
     /// (`compact`: the texts no live document holds leave them).
     pub dictionary_texts: (u64, u64),
+    /// Texts the compaction took back from the reprieve because a live segment cites them again:
+    /// `shard_<n>: field <f> id <id>, segment <uuid>` — a segment the previous compaction did not see
+    /// (19 November 2026). Empty in the normal case.
+    pub dictionary_revived: Vec<String>,
     pub purge_ms: u64,
     pub compact_ms: u64,
 }
@@ -54,6 +58,11 @@ impl MaintenanceReport {
     pub fn summary(&self) -> String {
         let (written_b, deleted_b) = self.before.documents();
         let (written_a, deleted_a) = self.after.documents();
+        let revived = if self.dictionary_revived.is_empty() {
+            String::new()
+        } else {
+            format!("\n{} dictionary text(s) cited again after their reprieve: {}", self.dictionary_revived.len(), self.dictionary_revived.join("; "))
+        };
         format!(
             "purge: {} asked, {} removed, {} absent ({} ms); compaction: {} rounds, dictionary texts {} → {} ({} ms)\n\
              documents {} → {} live, deleted in segments {} → {}, segments {} → {}, index {} → {} bytes (×{:.2} → ×{:.2} its text)",
@@ -62,7 +71,7 @@ impl MaintenanceReport {
             written_b - deleted_b, written_a - deleted_a, deleted_b, deleted_a,
             self.before.segments.len(), self.after.segments.len(),
             self.before.index_bytes, self.after.index_bytes, self.before.ratio(), self.after.ratio(),
-        )
+        ) + &revived
     }
 }
 
@@ -73,6 +82,13 @@ impl ShardedHandle {
     /// shard holds uncommitted documents. Returns the texts before and
     /// after, summed over the shards.
     pub fn compact_dictionaries(&self) -> Result<(u64, u64), String> {
+        self.compact_dictionaries_naming_revived().map(|(texts, _)| texts)
+    }
+
+    /// `compact_dictionaries`, with the texts taken back from the reprieve, each with its shard and the
+    /// segment that cites it (`MaintenanceReport::dictionary_revived`).
+    pub fn compact_dictionaries_naming_revived(&self) -> Result<((u64, u64), Vec<String>), String> {
+        let mut revived = Vec::new();
         let mut texts = (0u64, 0u64);
         for shard in 0..self.num_shards() {
             let handle = self.shard(shard).ok_or_else(|| format!("shard_{shard} missing"))?;
@@ -84,11 +100,12 @@ impl ShardedHandle {
                 let report = writer.compact_dictionary().map_err(|e| format!("shard_{shard}: {e}"))?;
                 texts.0 += report.texts_before;
                 texts.1 += report.texts_after;
+                let _ = &report.revived; // rouge : pas encore remonté
             }
             drop(guard);
             handle.reader.reload().map_err(|e| format!("shard_{shard} reload: {e}"))?;
         }
-        Ok(texts)
+        Ok((texts, revived))
     }
 
     /// The `_node_id` of every live document, ascending: what the caller
@@ -148,12 +165,13 @@ impl ShardedHandle {
         let purge_ms = started.elapsed().as_millis() as u64;
 
         let started = std::time::Instant::now();
-        let (merge_rounds, dictionary_texts) = if request.compact {
+        let (merge_rounds, dictionary_texts, dictionary_revived) = if request.compact {
             let rounds = self.compact(request.compact_max_docs)?;
             self.wait_merges_quiet()?;
-            (rounds, self.compact_dictionaries()?)
+            let (texts, revived) = self.compact_dictionaries_naming_revived()?;
+            (rounds, texts, revived)
         } else {
-            (0, (0, 0))
+            (0, (0, 0), Vec::new())
         };
         let compact_ms = started.elapsed().as_millis() as u64;
 
@@ -166,6 +184,7 @@ impl ShardedHandle {
             absent: requested.saturating_sub(purged),
             merge_rounds,
             dictionary_texts,
+            dictionary_revived,
             purge_ms,
             compact_ms,
         })
