@@ -70,10 +70,11 @@ fn rewriting_files_while_the_maintenance_compacts_loses_no_word() {
     // Diagnostic branch: the engine says, per compaction, the segments it sees; five rounds, for the CI runners
     // where the race shows (19 November 2026).
     std::env::set_var("LUCIVY_DEBUG_COMPACTION", "1");
-    for round in 0..5 {
+    for round in 0..10 {
         eprintln!("[debug-compaction] ===== round {round}");
         rewriting_files_once();
     }
+    panic!("diagnostic branch: fails on purpose, so that the CI shows the compaction log");
 }
 
 fn rewriting_files_once() {
