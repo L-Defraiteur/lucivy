@@ -354,8 +354,12 @@ pub(crate) fn compact_dead_texts(
     }
     let mut next_generation = snapshot.next_generation.max(1);
     let generation = next_generation;
-    next_generation += 1;
+    let reprieve = next_generation + 1;
+    next_generation += 2;
     remove_leftovers(directory, generation, &field_ids)?;
+    remove_leftovers(directory, reprieve, &field_ids)?;
+    // The reprieve of the last compaction, if a fold has not merged it away since.
+    let old_reprieve = snapshot.reprieve_generation.filter(|g| snapshot.generations.contains(g));
     let empty: Vec<u32> = Vec::new();
     for &field_id in &field_ids {
         let mut sfx_parts: Vec<OwnedBytes> = Vec::new();
@@ -374,13 +378,30 @@ pub(crate) fn compact_dead_texts(
         let ids = live.get(&field_id).unwrap_or(&empty);
         if sfx_parts.is_empty() {
             write_generation(directory, generation, field_id, &[])?;
+            write_generation(directory, reprieve, field_id, &[])?;
             continue;
         }
+        // The ids of the reprieve: a cited one comes back (`revived`), the others go.
+        let reprieved_before: std::collections::HashSet<u32> = old_reprieve
+            .and_then(|g| directory.open_read(std::path::Path::new(
+                &crate::suffix_fst::dictionary::dictionary_file_name(g, field_id, "termtexts"))).ok())
+            .and_then(|f| f.read_bytes().ok())
+            .map(|b| TermTextsReaderV3::open(b.as_slice()).map(|r| r.ids().collect()).unwrap_or_default())
+            .unwrap_or_default();
+        for &id in ids {
+            if reprieved_before.contains(&id) {
+                report.revived.push(format!("field {field_id} id {id}"));
+            }
+        }
         let keep = |id: u32| ids.binary_search(&id).is_ok();
-        let compacted = compact_parts_keeping(directory, sfx_parts, termtexts_parts, field_id, generation, Some(&keep))?;
+        let compacted = compact_parts_keeping(directory, sfx_parts.clone(), termtexts_parts.clone(), field_id, generation, Some(&keep))?;
         report.texts_after += compacted.texts as u64;
+        // The dead texts, but those of the last reprieve: one more cycle, still read.
+        let spare = |id: u32| ids.binary_search(&id).is_err() && !reprieved_before.contains(&id);
+        let spared = compact_parts_keeping(directory, sfx_parts, termtexts_parts, field_id, reprieve, Some(&spare))?;
+        report.reprieved += spared.texts as u64;
     }
-    report.bytes_after = generation_bytes(directory, generation, &field_ids);
+    report.bytes_after = generation_bytes(directory, generation, &field_ids) + generation_bytes(directory, reprieve, &field_ids);
     report.generation = Some(generation);
 
     let fold = index.dictionary_fold().clone();
@@ -392,7 +413,8 @@ pub(crate) fn compact_dead_texts(
             "dictionary compaction: the live dictionary changed meanwhile".to_string()));
     }
     meta.next_ids = current.next_ids();
-    meta.generations = vec![generation];
+    meta.generations = vec![generation, reprieve];
+    meta.reprieve_generation = Some(reprieve);
     meta.next_generation = next_generation;
     let next = SfxDictionary::open(directory, &meta, Some(&current));
     index.set_sfx_dictionary(Some(Arc::new(next)));

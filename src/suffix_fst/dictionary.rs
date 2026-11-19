@@ -644,7 +644,7 @@ impl SfxDictionary {
     /// no id minted.
     pub fn empty() -> Self {
         Self {
-            meta: SfxDictionaryMeta { generations: Vec::new(), next_generation: 1, next_ids: Default::default(), field_ids: Vec::new(), pending_segments: Vec::new() },
+            meta: SfxDictionaryMeta { generations: Vec::new(), next_generation: 1, next_ids: Default::default(), field_ids: Vec::new(), pending_segments: Vec::new(), reprieve_generation: None },
             fields: HashMap::new(),
             shared: Arc::new(DictionaryShared::new(HashMap::new())),
         }
@@ -968,7 +968,7 @@ mod tests {
             let meta = SfxDictionaryMeta {
                 generations: Vec::new(), next_generation: 1,
                 next_ids: [(7u32, 42u64)].into_iter().collect(),
-                field_ids: vec![7], pending_segments: vec!["seg1".to_string()],
+                field_ids: vec![7], pending_segments: vec!["seg1".to_string()], reprieve_generation: None,
             };
             let dict = SfxDictionary::open(&dir, &meta, None);
             let key = |t: &str, own: u16, sep: u8| super::super::collector_v3::intern_key(t, false, own, sep, true);
