@@ -319,6 +319,11 @@ pub struct DeadTextsReport {
     pub bytes_before: u64,
     /// Bytes of the generation written.
     pub bytes_after: u64,
+    /// Dead texts kept one more cycle in the reprieve generation.
+    pub reprieved: u64,
+    /// Texts of the reprieve that a live segment cites again: `field <f> id <id>, segment <uuid>` — a
+    /// segment the previous compaction did not see. Each is also written to stderr.
+    pub revived: Vec<String>,
 }
 
 /// Merge every live generation into one that keeps only the ids `live`

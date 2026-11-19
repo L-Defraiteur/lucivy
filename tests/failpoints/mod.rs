@@ -122,3 +122,83 @@ fn test_fail_on_commit_segment() -> ld_lucivy::Result<()> {
     assert!(index_writer.commit().is_err());
     Ok(())
 }
+
+/// Ids that the live segments' `.gmap`s cite and no live dictionary generation holds a text for: words lost.
+fn lost_words(index: &Index) -> usize {
+    use ld_lucivy::suffix_fst::gmap::GmapReader;
+    let reader = index.reader().unwrap();
+    reader.reload().unwrap();
+    let dictionary = index.sfx_dictionary().expect("a dictionary index");
+    let mut lost = 0;
+    for segment in reader.searcher().segment_readers() {
+        for field in segment.sfx_fields().collect::<Vec<_>>() {
+            let Some(file) = segment.sfx_index_file("gmap", field) else { continue };
+            let bytes = file.read_bytes().unwrap();
+            let texts = dictionary.field(field.field_id()).and_then(|f| f.termtexts_reader());
+            for id in GmapReader::open(bytes.as_slice()).unwrap().iter() {
+                if !texts.as_ref().is_some_and(|t| t.text(id).is_some()) {
+                    lost += 1;
+                }
+            }
+        }
+    }
+    lost
+}
+
+/// **A compaction that did not see a segment keeps its texts one more cycle** (19 November 2026, the lost words
+/// of rag3weaver's code base). The compaction of the shard dictionary keeps the ids the committed segments'
+/// `.gmap`s cite; on the host, a segment outside that view — the failpoint hides one here — lost the texts only it
+/// cited, silently. The dead texts now go to a reprieve generation, still read, for one cycle; the next
+/// compaction keeps those a `.gmap` cites again and names the segment that cites them.
+#[test]
+fn test_failpoints_a_compaction_that_misses_a_segment_loses_no_word() -> ld_lucivy::Result<()> {
+    let _scenario = fail::FailScenario::setup();
+    let mut schema_builder = Schema::builder();
+    let text_field = schema_builder.add_text_field("text", TEXT);
+    let index = Index::create_in_ram(schema_builder.build());
+    assert!(index.sfx_dictionary().is_some(), "a dictionary index by default");
+    let mut index_writer: IndexWriter = index.writer_with_num_threads(1, 15_000_000)?;
+    index_writer.add_document(doc!(text_field => "fn seenword alpha"))?;
+    index_writer.commit()?;
+    index_writer.add_document(doc!(text_field => "fn hiddenword beta"))?;
+    index_writer.commit()?;
+    assert_eq!(lost_words(&index), 0);
+
+    fail::cfg("compact_dictionary::hide_segments", "1*return").unwrap();
+    index_writer.compact_dictionary()?;
+    fail::remove("compact_dictionary::hide_segments");
+    assert_eq!(lost_words(&index), 0, "the texts of the hidden segment are in reprieve, still read");
+
+    let report = index_writer.compact_dictionary()?;
+    assert!(!report.revived.is_empty(), "the next compaction keeps the texts cited again: {report:?}");
+    assert!(report.revived.iter().all(|r| r.contains("segment ")), "and names the segment: {:?}", report.revived);
+    assert_eq!(lost_words(&index), 0, "kept after the reprieve");
+    index_writer.compact_dictionary()?;
+    assert_eq!(lost_words(&index), 0, "kept for good");
+    Ok(())
+}
+
+/// **A dead text leaves after its reprieve** (19 November 2026): a word only a deleted document held goes to the
+/// reprieve generation at the first compaction, and out of the dictionary at the second.
+#[test]
+fn test_failpoints_a_dead_text_leaves_after_its_reprieve() -> ld_lucivy::Result<()> {
+    let _scenario = fail::FailScenario::setup();
+    let mut schema_builder = Schema::builder();
+    let text_field = schema_builder.add_text_field("text", TEXT);
+    let index = Index::create_in_ram(schema_builder.build());
+    let mut index_writer: IndexWriter = index.writer_with_num_threads(1, 15_000_000)?;
+    index_writer.add_document(doc!(text_field => "fn keptword alpha"))?;
+    index_writer.add_document(doc!(text_field => "fn deadword gamma"))?;
+    index_writer.commit()?;
+    index_writer.delete_term(Term::from_field_text(text_field, "deadword"));
+    index_writer.commit()?;
+    // A merge drops the dead document's ids from the `.gmap`.
+    index_writer.compact(1_000_000)?;
+    let first = index_writer.compact_dictionary()?;
+    let second = index_writer.compact_dictionary()?;
+    assert!(first.reprieved > 0, "the first compaction puts the dead texts in reprieve: {first:?}");
+    assert!(second.texts_after < first.texts_after + first.reprieved, "the second one lets them go: {first:?} then {second:?}");
+    assert!(second.revived.is_empty(), "nothing came back: {second:?}");
+    assert_eq!(lost_words(&index), 0);
+    Ok(())
+}
