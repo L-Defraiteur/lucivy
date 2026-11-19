@@ -186,10 +186,12 @@ pub fn fuzzy_prescan(
         // edits: a value where nothing is — most candidates of a common
         // piece — is dropped after one bit-parallel pass over its bytes.
         fold_bytes(text, strip, &mut quick);
+        crate::suffix_fst::briques::profile::bump(|c| &c.n_stored_dp_bytes, quick.len() as u64);
         if !fuzzy_spans::within_distance(&needle, &quick, d) {
             return;
         }
         fold_into(text, strip, &mut hay, &mut back);
+        crate::suffix_fst::briques::profile::bump(|c| &c.n_stored_dp_bytes, hay.len() as u64);
         match metric {
             FuzzyMetric::Levenshtein => {
                 for (s, e, dist) in fuzzy_spans::fuzzy_spans_long(&needle, &hay, d) {
