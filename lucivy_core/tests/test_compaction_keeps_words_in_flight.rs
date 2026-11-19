@@ -103,11 +103,12 @@ fn rewriting_files_once() {
             let mut runs = 0u32;
             let mut refused = 0u32;
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                match index.maintain(&MaintenanceRequest { compact: true, ..Default::default() }) {
+                // Diagnostic: the dictionary compaction alone, as often as it is let through.
+                match index.compact_dictionaries() {
                     Ok(_) => runs += 1,
                     Err(_) => refused += 1,
                 }
-                std::thread::sleep(std::time::Duration::from_millis(5));
+                std::thread::sleep(std::time::Duration::from_millis(1));
             }
             (runs, refused)
         })
