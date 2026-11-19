@@ -1,12 +1,14 @@
 //! Quick test: reopen persisted index and run regex query to verify store fallback.
 
+mod common;
+
+/// Ignored: reads the index `bench_sharding` t01 writes, under `LUCIVY_DIAG_INDEX`.
 #[test]
+#[ignore]
 fn test_regex_on_persisted_index() {
-    let base = "/home/luciedefraiteur/lucivy_bench_sharding/round_robin";
-    if !std::path::Path::new(base).exists() {
-        eprintln!("Skipping — no persisted index at {base}");
-        return;
-    }
+    let base = common::diag_index("round_robin");
+    let base = base.as_str();
+    assert!(std::path::Path::new(base).exists(), "no persisted index at {base}: run bench_sharding t01 first");
 
     // Remove lock files
     for i in 0..4 {
