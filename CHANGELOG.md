@@ -1,3 +1,35 @@
+Lucivy 4.3.12 — 19 November 2026
+================================
+
+One fix, with its safety net and a report; the index format is unchanged (an
+older lucivy reads a 4.3.12 index: the reprieve is one more generation to it).
+
+- **Fixed: a word removed by the dictionary compaction came back with its old
+  id and no text.** A new word enters the shard dictionary's pending table,
+  which forgets it once a commit has named its texts — by the commit epoch,
+  which only `IndexWriter::prepare_commit` turned. The shards' commit
+  (`drain_workers`, `flush_workers`, `finalize_flush_and_prepare`) never did,
+  so the table kept every word for good, and it answers without checking that
+  the text still exists. Once `maintain` with `compact` had removed the text
+  of a word no live document cited, the next document holding that word took
+  the old id back: no generation held its text, and the document no longer
+  came out for that word, exact or fuzzy, silently. rag3weaver's code index
+  had lost some 7 500 words this way. `flush_workers` now turns the epoch, and
+  the compaction removes the ids it drops from the pending table. Witnesses
+  `a_word_removed_by_the_compaction_comes_back_with_a_text` (2 words lost
+  before) and `files_rewritten_under_a_tight_compaction_loop_lose_no_word`
+  (383 before). Words lost before 4.3.12 come back only by rebuilding the
+  index.
+- **A safety net: dead texts get one cycle of reprieve.** The compaction no
+  longer drops a dead text at once: it goes to a reprieve generation, read
+  like the others; the next compaction keeps those cited again and lets the
+  others go. A dead text now leaves at the second compaction instead of the
+  first. `check_dictionary` counts the ids held only by the reprieve apart
+  (`FieldCheck::in_reprieve`).
+- **`maintain` names the texts taken back from the reprieve**, with their
+  shard and the segment that cites them (`MaintenanceReport::dictionary_revived`,
+  and in `summary()`).
+
 Lucivy 4.3.11 — 19 November 2026
 ================================
 
