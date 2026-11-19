@@ -361,6 +361,7 @@ pub(crate) fn compact_dead_texts(
     // The reprieve of the last compaction, if a fold has not merged it away since.
     let old_reprieve = snapshot.reprieve_generation.filter(|g| snapshot.generations.contains(g));
     let empty: Vec<u32> = Vec::new();
+    let mut dropped: Vec<(u32, Vec<u32>)> = Vec::new();
     for &field_id in &field_ids {
         let mut sfx_parts: Vec<OwnedBytes> = Vec::new();
         let mut termtexts_parts: Vec<OwnedBytes> = Vec::new();
@@ -393,6 +394,11 @@ pub(crate) fn compact_dead_texts(
                 report.revived.push(format!("field {field_id} id {id}"));
             }
         }
+        // The texts of the last reprieve no one cites leave the dictionary now: their ids leave the pending
+        // table too, below, once the new dictionary is live.
+        let mut gone: Vec<u32> = reprieved_before.iter().copied().filter(|id| ids.binary_search(id).is_err()).collect();
+        gone.sort_unstable();
+        dropped.push((field_id, gone));
         let keep = |id: u32| ids.binary_search(&id).is_ok();
         let compacted = compact_parts_keeping(directory, sfx_parts.clone(), termtexts_parts.clone(), field_id, generation, Some(&keep))?;
         report.texts_after += compacted.texts as u64;
@@ -417,6 +423,9 @@ pub(crate) fn compact_dead_texts(
     meta.reprieve_generation = Some(reprieve);
     meta.next_generation = next_generation;
     let next = SfxDictionary::open(directory, &meta, Some(&current));
+    for (field_id, gone) in &dropped {
+        next.forget_pending_ids(*field_id, &|id| u32::try_from(id).is_ok_and(|id| gone.binary_search(&id).is_ok()));
+    }
     index.set_sfx_dictionary(Some(Arc::new(next)));
     fold.mark_changed();
     Ok(report)

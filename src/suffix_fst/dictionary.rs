@@ -543,6 +543,13 @@ impl PendingStripe {
         self.epochs.retain(|e| e.epoch >= epoch);
     }
 
+    /// Drop the entries of `field_id` whose id `gone` names.
+    fn forget_ids(&mut self, field_id: u32, gone: &dyn Fn(u64) -> bool) {
+        for e in &mut self.epochs {
+            e.table.retain(|entry| !(entry.field_id == field_id && gone(entry.id)));
+        }
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.epochs.iter().map(|e| e.table.len()).sum()
@@ -782,6 +789,15 @@ impl SfxDictionary {
         let current = self.shared.epoch.load(std::sync::atomic::Ordering::Acquire);
         for stripe in &self.shared.stripes {
             stripe.lock().unwrap().forget_before(current);
+        }
+    }
+
+    /// **Forget the pending ids a compaction removed** (19 November 2026): the pending table answers without
+    /// checking that a text still exists, so an id whose text the dictionary no longer holds must leave it, or
+    /// the next document with the same word takes it back and cites an id with no text.
+    pub fn forget_pending_ids(&self, field_id: u32, gone: &dyn Fn(u64) -> bool) {
+        for stripe in &self.shared.stripes {
+            stripe.lock().unwrap().forget_ids(field_id, gone);
         }
     }
 

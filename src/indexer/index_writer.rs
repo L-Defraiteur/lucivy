@@ -596,6 +596,12 @@ impl<D: Document> IndexWriter<D> {
     ///
     /// Used by ShardActor to implement non-blocking commit via Suspend.
     pub fn flush_workers(&mut self) -> crate::Result<Vec<crate::actor::reply::ReplyReceiver<Result<Vec<u8>, Vec<u8>>>>> {
+        // The dictionary's commit epoch turns before any writer flushes, as in `prepare_commit`: what they
+        // minted so far is this commit's, and the commit forgets it once named (`forget_committed_pending`).
+        // The shards' commit came here without it, and the pending table never forgot (19 November 2026).
+        if let Some(dictionary) = self.index.sfx_dictionary() {
+            dictionary.begin_commit_epoch();
+        }
         let mut receivers = Vec::new();
         for i in 0..self.worker_pool.len() {
             let (env, rx) = IndexerFlushMsg.into_request();
