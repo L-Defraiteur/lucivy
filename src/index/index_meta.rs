@@ -439,6 +439,13 @@ pub struct SfxDictionaryMeta {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub pending_segments: Vec<String>,
+    /// **The reprieve generation** (19 November 2026): the texts the last dead-text compaction found cited by
+    /// no committed segment, kept and read for one more cycle. The next compaction keeps those a `.gmap` cites
+    /// again (a segment it did not see: the lost words of rag3weaver's code base) and lets the others go. A
+    /// generation no longer in `generations` (merged by a fold) is no reprieve any more.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reprieve_generation: Option<u64>,
 }
 
 impl SfxDictionaryMeta {
