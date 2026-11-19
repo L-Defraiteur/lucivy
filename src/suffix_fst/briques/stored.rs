@@ -151,6 +151,11 @@ pub fn fuzzy_prescan(
         return empty();
     }
     let lower = q.to_lowercase();
+    // The pieces of a pigeonhole cut, kept to place the windows of the verification (below).
+    let piece_ranges: Option<Vec<(usize, usize)>> = match &generator {
+        FuzzyGenerator::Pieces(pieces) => Some(pieces.clone()),
+        _ => None,
+    };
     let literals: Vec<String> = match generator {
         // An occurrence within `d` edits holds one of the `d + 1` pieces intact.
         FuzzyGenerator::Pieces(pieces) => pieces.iter().map(|&(a, b)| lower[a..b].to_string()).collect(),
@@ -179,9 +184,54 @@ pub fn fuzzy_prescan(
     let (mut needle, mut scratch) = (Vec::new(), Vec::new());
     fold_into(&q, strip, &mut needle, &mut scratch);
     let d = distance as usize;
+    // **Windows around the pieces** (Levenshtein, pigeonhole cut). An occurrence within `d` edits holds one of
+    // the `d + 1` pieces intact, at its offset in the needle give or take `d`; so every end offset of an
+    // occurrence lies near an occurrence of a piece in the value, and the edit distance only has to run there.
+    // Before, it ran over every candidate's whole value: a long needle is not bit-parallel (`last_row`, over 64
+    // bytes), and a short common piece makes a third of the documents candidates — 23 MB and 6.5 s per segment
+    // for the 230-byte query of the archivist (ticket of 14 November 2026). The pieces are folded as the needle
+    // is; folding goes character by character, so the folded pieces must spell the needle, else the whole value
+    // is read as before.
+    let windows: Option<Vec<(Vec<u8>, usize)>> = match (&metric, &piece_ranges) {
+        (FuzzyMetric::Levenshtein, Some(ranges)) => {
+            let mut folded = Vec::new();
+            let mut spelled = Vec::new();
+            for &(a, b) in ranges {
+                let mut piece = Vec::new();
+                fold_bytes(&lower[a..b], strip, &mut piece);
+                let offset = spelled.len();
+                spelled.extend_from_slice(&piece);
+                if !piece.is_empty() {
+                    folded.push((piece, offset));
+                }
+            }
+            (spelled == needle && !folded.is_empty()).then_some(folded)
+        }
+        _ => None,
+    };
     let (mut quick, mut hay, mut back) = (Vec::new(), Vec::new(), Vec::new());
-    let label = || format!("fuzzy {q:?} d={distance} {metric:?} pieces={literals:?}");
+    let mut spans_found: Vec<(usize, usize, u32)> = Vec::new();
+    let label = || format!("fuzzy {q:?} d={distance} {metric:?} pieces={literals:?} windows={}", windows.is_some());
     let found = verify_stored(seg_reader, field, &candidates, &label, since, |text, out| {
+        if let Some(pieces) = &windows {
+            fold_bytes(text, strip, &mut quick);
+            if !pieces.iter().any(|(p, _)| holds(&quick, p)) {
+                return;
+            }
+            fold_into(text, strip, &mut hay, &mut back);
+            spans_found.clear();
+            for (lo, hi) in piece_windows(&hay, pieces, needle.len(), d) {
+                crate::suffix_fst::briques::profile::bump(|c| &c.n_stored_dp_bytes, (hi - lo) as u64);
+                for (s, e, dist) in fuzzy_spans::fuzzy_spans_long(&needle, &hay[lo..hi], d) {
+                    spans_found.push((lo + s, lo + e, dist));
+                }
+            }
+            for &(s, e, dist) in &spans_found {
+                let (from, to) = source_span(&back, s, e);
+                out.push((from, to, dist as f32));
+            }
+            return;
+        }
         // Every occurrence (Levenshtein or Jaro-Winkler) is within `d`
         // edits: a value where nothing is — most candidates of a common
         // piece — is dropped after one bit-parallel pass over its bytes.
@@ -222,6 +272,54 @@ pub fn fuzzy_prescan(
     }).collect();
     let (doc_tf, highlights) = flatten(&found, true);
     Ok((doc_tf, highlights, coverage))
+}
+
+/// Whether `hay` holds `needle`: the scan of `for_each_occurrence`, stopped at the first.
+fn holds(hay: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return false;
+    }
+    let last_start = hay.len() - needle.len();
+    let mut i = 0;
+    while i <= last_start {
+        match hay[i..=last_start].iter().position(|&b| b == needle[0]) {
+            None => return false,
+            Some(p) => {
+                let s = i + p;
+                if &hay[s..s + needle.len()] == needle {
+                    return true;
+                }
+                i = s + 1;
+            }
+        }
+    }
+    false
+}
+
+/// The disjoint windows of `hay` where an occurrence of a needle of `m` bytes within `d` edits can end, from
+/// the occurrences of its pieces (`(folded piece, offset in the needle)`): an occurrence holding a piece found
+/// at `p` starts in `[p - o - d, p - o + d]` and ends at most `m + d` later. Each window starts far enough
+/// before (`4d + 2` bytes more) for the semi-global distance of every end offset it holds to be the one the
+/// whole value gives, and overlapping windows are merged, so a run of acceptable end offsets is never cut —
+/// `fuzzy_spans_long` on the windows finds the occurrences, and the spans, it finds on the whole value.
+fn piece_windows(hay: &[u8], pieces: &[(Vec<u8>, usize)], m: usize, d: usize) -> Vec<(usize, usize)> {
+    let mut windows: Vec<(usize, usize)> = Vec::new();
+    for (piece, offset) in pieces {
+        for_each_occurrence(hay, piece, |p| {
+            let start = p.saturating_sub(offset + 4 * d + 2);
+            let end = (p + (m - offset) + 3 * d + 2).min(hay.len());
+            windows.push((start, end));
+        });
+    }
+    windows.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(windows.len());
+    for (s, e) in windows {
+        match merged.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    merged
 }
 
 /// The prescan of a regex on one segment of an index without positions:
