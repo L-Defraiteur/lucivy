@@ -100,7 +100,7 @@ impl ShardedHandle {
                 let report = writer.compact_dictionary().map_err(|e| format!("shard_{shard}: {e}"))?;
                 texts.0 += report.texts_before;
                 texts.1 += report.texts_after;
-                let _ = &report.revived; // rouge : pas encore remonté
+                revived.extend(report.revived.iter().map(|r| format!("shard_{shard}: {r}")));
             }
             drop(guard);
             handle.reader.reload().map_err(|e| format!("shard_{shard} reload: {e}"))?;
