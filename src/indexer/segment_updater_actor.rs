@@ -515,6 +515,12 @@ impl SegmentUpdaterState {
         let result = (|| -> crate::Result<super::dictionary_commit::DeadTextsReport> {
             let mut live: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
             for meta in committed {
+                // Test door: a compaction that does not see the committed segments (the lost words of
+                // 19 November 2026 came from a segment outside this view).
+                #[cfg(feature = "failpoints")]
+                if fail::eval("compact_dictionary::hide_segments", |_| ()).is_some() {
+                    continue;
+                }
                 let reader = crate::SegmentReader::open(&index.segment(meta))?;
                 let fields: Vec<crate::schema::Field> = reader.sfx_fields().collect();
                 for field in fields {
