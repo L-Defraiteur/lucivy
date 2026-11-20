@@ -150,6 +150,7 @@ impl ShardedHandle {
                 request.max_purge_ratio * 100.0,
             ));
         }
+        self.ensure_no_untagged_documents()?;
         let before = self.index_report()?;
 
         let started = std::time::Instant::now();
@@ -158,7 +159,7 @@ impl ShardedHandle {
             for &id in &ids {
                 self.delete_by_node_id(id)?;
             }
-            self.commit()?;
+            self.commit_keeping_generation()?;
             self.wait_merges_quiet()?;
         }
         let purged = live_before.saturating_sub(self.num_docs());
