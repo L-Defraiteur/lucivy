@@ -323,6 +323,13 @@ pub struct IndexSettings {
     #[serde(default)]
     #[serde(skip_serializing_if = "is_false")]
     pub derived_in_ram: bool,
+    /// **The oldest lucivy that may open this index** (20 November 2026, 4.3.13). A version older than this refuses
+    /// to open it and says which version it needs, before any writer or garbage collection: a newer index may keep
+    /// files (the tagged generations of 4.4) that an older collector would take for garbage. Absent on every index
+    /// written before 4.4.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_lucivy: Option<String>,
     /// Postings without positions (`positions: false` in the schema config,
     /// 4.1): `.sfxpost` and `.word_sfxpost` keep each ordinal's documents
     /// and term frequencies only (`SFP6`, `WSP6`), and `.posmap`,
@@ -384,6 +391,7 @@ impl Default for IndexSettings {
             derived_in_ram: false,
             positions: true,
             dictionary_wait: true,
+            min_lucivy: None,
         }
     }
 }
@@ -704,6 +712,7 @@ mod tests {
                 derived_in_ram: false,
                 positions: true,
                 dictionary_wait: true,
+                min_lucivy: None,
             }
         );
         {
