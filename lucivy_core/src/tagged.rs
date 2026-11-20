@@ -171,10 +171,11 @@ impl ShardedHandle {
         Ok(())
     }
 
-    /// A commit that does not change what the index holds for its caller (a maintenance: purge, compaction): on a
-    /// tagged index, its meta.json keeps the current generation in its payload, and no new generation is made.
-    /// Untagged, a plain commit.
-    pub(crate) fn commit_keeping_generation(&self) -> Result<(), String> {
+    /// **A commit that makes no new version of the caller's database**: a maintenance (purge, compaction), a rebuild,
+    /// documents set aside by rule. On a tagged index, where `commit()` is refused, its meta.json keeps the current
+    /// generation in its payload and no generation is made; `revert_to` a kept generation still brings back what that
+    /// generation held. Untagged, a plain commit.
+    pub fn commit_keeping_generation(&self) -> Result<(), String> {
         if !self.is_tagged() {
             return self.commit_inner();
         }
