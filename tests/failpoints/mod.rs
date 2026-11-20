@@ -209,3 +209,37 @@ fn test_failpoints_a_dead_text_leaves_after_its_reprieve() -> ld_lucivy::Result<
     assert_eq!(lost_words(&index), 0);
     Ok(())
 }
+
+/// **After a failed flush, every accepted document is indexed, or the commit says it was not** (20 November 2026,
+/// ticket `docs/lucivy/tickets/2026-11-19-un-flush-en-echec-ne-refuse-pas-les-ajouts-suivants.md` in rag3db).
+/// `test_fail_on_flush_segment_but_one_worker_remains` expects `add_document` to fail after a worker's flush fails,
+/// and it never does. What matters is not the refusal but the count: a document `add_document` accepted and the
+/// commit then dropped would be a silent loss.
+#[test]
+fn test_failpoints_documents_accepted_after_a_failed_flush_are_indexed_or_the_commit_fails() -> ld_lucivy::Result<()> {
+    let _fail_scenario_guard = fail::FailScenario::setup();
+    let mut schema_builder = Schema::builder();
+    let text_field = schema_builder.add_text_field("text", TEXT);
+    let index = Index::create_in_ram(schema_builder.build());
+    let mut index_writer: IndexWriter = index.writer_with_num_threads(2, 30_000_000)?;
+    fail::cfg("FieldSerializer::close_term", "1*return(simulatederror)").unwrap();
+    let mut accepted = 0u64;
+    for i in 0..100_000 {
+        if index_writer.add_document(doc!(text_field => format!("hellohappytaxpayerlongtokenblabla{i}"))).is_err() {
+            break;
+        }
+        accepted += 1;
+    }
+    fail::remove("FieldSerializer::close_term");
+    match index_writer.commit() {
+        Err(e) => eprintln!("accepted {accepted}, the commit failed and says so: {e}"),
+        Ok(_) => {
+            let reader = index.reader()?;
+            reader.reload()?;
+            let indexed = reader.searcher().num_docs();
+            eprintln!("accepted {accepted}, indexed {indexed}");
+            assert_eq!(indexed, accepted, "a committed index holds every accepted document");
+        }
+    }
+    Ok(())
+}
