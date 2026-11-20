@@ -1,4 +1,4 @@
-# lucivy 4.3.12
+# lucivy 4.3.13
 
 [![PyPI](https://img.shields.io/pypi/v/lucivy?label=PyPI&color=blue)](https://pypi.org/project/lucivy/)
 [![npm](https://img.shields.io/npm/v/lucivy?label=npm&color=cb3837)](https://www.npmjs.com/package/lucivy)
@@ -31,11 +31,17 @@ tab. The second half is typed by hand — `index postgres`, then `--strict
 "heap_insert"`, `"CREATE INDEX CONCURRENTLY"` (27 hits, 11 ms), `--fuzzy 1
 "vaccum"` (17 ms) and `--regex "ExecInit[A-Z][a-zA-Z]+\("` (20 ms).*
 
+### What's new in 4.3.13
+
+A patch release with one safeguard, ahead of 4.4. The index format is unchanged.
+
+- **An index that a newer lucivy marked is refused, by name.** The index settings gain `min_lucivy`; an older lucivy refuses to open such an index before any writer or garbage collection, and says which version it needs. lucivy 4.4 will write it on the indexes that keep tagged generations, which an older garbage collector would delete. Indexes written so far do not carry it and open as before.
+
 ### What's new in 4.3.12
 
 A patch release with one fix. The index format is unchanged.
 
-- **The dictionary compaction no longer loses words.** A word whose text the compaction had removed could come back in a new document with its old id and no text: that document stopped coming out for the word, exact or fuzzy, silently. The shards' commit now forgets its pending words, and the compaction removes the ids it drops. As a safety net, a dead text is kept one more cycle in a reprieve, still read; `maintain` names any text taken back from it, and `check_dictionary` counts them apart. Words lost before 4.3.12 come back by rebuilding the index.
+- **The dictionary compaction no longer loses words.** A word whose text the compaction had removed could come back in a new document with its old id and no text: that document stopped coming out for the word, exact or fuzzy, silently. The shards' commit now forgets its pending words, and the compaction removes the ids it drops. As a safety net, a dead text is kept one more cycle in a reprieve, still read; `maintain` names any text taken back from it, and `check_dictionary` counts them apart. Words lost before 4.3.13 come back by rebuilding the index.
 
 ### What's new in 4.3.11
 
@@ -227,7 +233,7 @@ A patch release that fixes concurrency between searches and writes. The index fo
   3.0.x does not open a 4.0 index; the first commit in 4.0 converts without
   return.
 - One version number for the whole workspace: `ld-lucivy`, `lucivy-core`,
-  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.3.12.
+  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.3.13.
 
 3.0.x brought SFX v3 (exact byte spans on every query mode), boolean syntax,
 Jaro-Winkler, query warnings, bring-your-own-storage in every binding, snapshots
