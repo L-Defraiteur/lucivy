@@ -83,6 +83,9 @@ impl ShardedHandle {
             shard.next_payload.lock().map_err(|_| "payload lock poisoned")?.take();
         }
         committed?;
+        // generations.json names g before meta.<g>.json is written: a merge that collects in between keeps it.
+        kept.push(g);
+        self.write_shard_state(&kept, g)?;
         for (i, shard) in self.shards.iter().enumerate() {
             let dir = shard.index.directory();
             let meta = dir.atomic_read(Path::new("meta.json")).map_err(|e| format!("shard_{i}: meta.json: {e}"))?;
@@ -90,8 +93,6 @@ impl ShardedHandle {
         }
         let stats = self.storage.read_root_file(SHARD_STATS_FILE)?;
         self.storage.write_root_file(&stats_of(g), &stats)?;
-        kept.push(g);
-        self.write_shard_state(&kept, g)?;
         self.storage.write_root_file(ROOT_GENERATIONS, &state_json(&kept, g))
     }
 

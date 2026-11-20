@@ -157,6 +157,11 @@ impl SegmentUpdaterShared {
         // The kept tagged generations (lucivy 4.4): everything their meta files name stays, segments, deletes,
         // dictionary generations and pending pairs, until the caller releases them.
         let directory = self.index.directory();
+        // generations.json and meta.<g>.json are written through the managed directory, which registers them: a
+        // file the list does not name is deleted.
+        if directory.exists(std::path::Path::new(crate::index::TAGGED_GENERATIONS_FILE)).unwrap_or(false) {
+            files.insert(std::path::PathBuf::from(crate::index::TAGGED_GENERATIONS_FILE));
+        }
         for g in crate::index::kept_tagged_generations(directory) {
             let path = crate::index::tagged_meta_path(g);
             files.insert(path.clone());
