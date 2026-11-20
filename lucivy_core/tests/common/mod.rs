@@ -67,6 +67,14 @@ pub fn usable(root: &str, found: usize, min: usize, substitute: &str) -> bool {
         eprintln!(
             "CORPUS ABSENT: {found} files under {root}, {min} needed — {substitute}, because {ABSENT_OK}=1"
         );
+        // cargo hides the stderr of a passing test: the absence is also written where the CI prints it.
+        if let Ok(log) = std::env::var(SKIPPED_LOG) {
+            use std::io::Write;
+            let test = std::thread::current().name().unwrap_or("?").to_string();
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+                let _ = writeln!(f, "{test}: corpus absent ({found} files under {root}, {min} needed) — {substitute}");
+            }
+        }
         return false;
     }
     panic!(
