@@ -171,6 +171,33 @@ impl ShardedHandle {
         Ok(())
     }
 
+    /// A commit that does not change what the index holds for its caller (a maintenance: purge, compaction): on a
+    /// tagged index, its meta.json keeps the current generation in its payload, and no new generation is made.
+    /// Untagged, a plain commit.
+    pub(crate) fn commit_keeping_generation(&self) -> Result<(), String> {
+        if !self.is_tagged() {
+            return self.commit_inner();
+        }
+        let (_, current) = self.tagged_state()?;
+        for shard in &self.shards {
+            *shard.next_payload.lock().map_err(|_| "payload lock poisoned")? = Some(format!("{PAYLOAD_PREFIX}{current}"));
+        }
+        let committed = self.commit_inner();
+        for shard in &self.shards {
+            shard.next_payload.lock().map_err(|_| "payload lock poisoned")?.take();
+        }
+        committed
+    }
+
+    /// A maintenance of a tagged index commits nothing of its caller's: documents not yet committed would land
+    /// outside every generation.
+    pub(crate) fn ensure_no_untagged_documents(&self) -> Result<(), String> {
+        if self.is_tagged() && self.shards.iter().any(|s| s.has_uncommitted()) {
+            return Err("this index is tagged (lucivy 4.4): commit_tagged(<generation>) the pending documents before a maintenance".into());
+        }
+        Ok(())
+    }
+
     fn ensure_writable_for_tagged(&self) -> Result<(), String> {
         if self.read_only {
             return Err("a read-only handle does not revert".into());

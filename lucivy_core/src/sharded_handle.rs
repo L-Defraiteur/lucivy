@@ -2980,7 +2980,8 @@ impl ShardedHandle {
     pub fn compact(&self, max_docs: usize) -> Result<usize, String> {
         self.ensure_open()?;
         self.ensure_writable()?;
-        self.commit()?;
+        self.ensure_no_untagged_documents()?;
+        self.commit_keeping_generation()?;
         let mut merges = 0usize;
         for (i, shard) in self.shards.iter().enumerate() {
             // Rounds until the segment count stops falling: a round only
@@ -3013,7 +3014,7 @@ impl ShardedHandle {
             }
         }
         // The commit waits for the merges it finds in flight and reloads.
-        self.commit()?;
+        self.commit_keeping_generation()?;
         Ok(merges)
     }
 
