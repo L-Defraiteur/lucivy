@@ -482,6 +482,26 @@ impl SfxDictionaryMeta {
     }
 }
 
+/// **The file that marks a tagged index** (lucivy 4.4): `{"kept": [g…], "current": g}` in a shard's directory, the
+/// generations kept on disk as `meta.<g>.json`. Its presence makes every `meta.json` carry `min_lucivy`, so that an
+/// older lucivy refuses the index instead of collecting the kept generations as garbage.
+pub const TAGGED_GENERATIONS_FILE: &str = "generations.json";
+
+/// The kept tagged generations of a directory (`TAGGED_GENERATIONS_FILE`), empty on an untagged one.
+pub fn kept_tagged_generations(directory: &dyn crate::Directory) -> Vec<u64> {
+    directory
+        .atomic_read(std::path::Path::new(TAGGED_GENERATIONS_FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v["kept"].as_array().map(|a| a.iter().filter_map(|g| g.as_u64()).collect()))
+        .unwrap_or_default()
+}
+
+/// The meta file of a kept tagged generation.
+pub fn tagged_meta_path(g: u64) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("meta.{g}.json"))
+}
+
 /// Meta information about the `Index`.
 ///
 /// This object is serialized on disk in the `meta.json` file.

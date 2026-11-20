@@ -467,6 +467,21 @@ impl Index {
         self.derived_cache.lock().unwrap().retain(|(seg, _), _| live.contains(seg));
     }
 
+    /// **Reopen the shard dictionary from the `meta.json` on disk** (lucivy 4.4, a revert to a tagged generation): a
+    /// new dictionary, with no shared state of the former one (its pending table, its next ids, its caches), as an
+    /// opening of the index would make it.
+    pub fn reload_sfx_dictionary(&self) -> crate::Result<()> {
+        let metas = self.load_metas()?;
+        let dictionary = match &metas.sfx_dictionary {
+            Some(d) => Some(Arc::new(SfxDictionary::open(self.directory(), d, None))),
+            None if metas.index_settings.sfx_version == crate::suffix_fst::dictionary::DICTIONARY_SFX_VERSION =>
+                Some(Arc::new(SfxDictionary::empty())),
+            None => None,
+        };
+        self.set_sfx_dictionary(dictionary);
+        Ok(())
+    }
+
     /// The shard dictionary, on an index with `sfx_version` 4.
     pub fn sfx_dictionary(&self) -> Option<Arc<SfxDictionary>> {
         self.sfx_dictionary.read().unwrap().clone()

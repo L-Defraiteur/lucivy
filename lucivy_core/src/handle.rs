@@ -44,6 +44,9 @@ pub struct LucivyHandle {
     pub config: Option<SchemaConfig>,
     /// True if there are uncommitted changes (add/remove/update without commit).
     pub has_uncommitted: AtomicBool,
+    /// The payload the next commit writes in `meta.json` (lucivy 4.4: `lucivy-generation:<g>`, set by
+    /// `ShardedHandle::commit_tagged`). Taken by the commit.
+    pub next_payload: Mutex<Option<String>>,
 }
 
 /// Default writer heap size.
@@ -212,6 +215,7 @@ impl LucivyHandle {
             field_map,
             config: Some(config.clone()),
             has_uncommitted: AtomicBool::new(false),
+            next_payload: Mutex::new(None),
         })
     }
 
@@ -261,6 +265,7 @@ impl LucivyHandle {
             field_map,
             config,
             has_uncommitted: AtomicBool::new(false),
+            next_payload: Mutex::new(None),
         })
     }
 
@@ -299,6 +304,34 @@ impl LucivyHandle {
         change()?;
         *guard = Some(create_writer(&self.index)?);
         Ok(())
+    }
+
+    /// Open an index for reading only (lucivy 4.4, `ShardedHandle::open_read_only_at`): no writer, no lock, nothing
+    /// written; `dir` decides what is read.
+    pub fn open_read_only(dir: impl Directory) -> Result<Self, String> {
+        let config_bytes = dir.atomic_read(Path::new(CONFIG_FILE)).ok();
+        let index = Index::open(dir).map_err(|e| format!("cannot open index: {e}"))?;
+        let config = config_bytes.and_then(|c| SchemaConfig::from_stored_json(&c).ok());
+        if let Some(config) = &config {
+            configure_tokenizers(&index, config);
+        }
+        let schema = index.schema();
+        let field_map = schema.fields().map(|(field, entry)| (entry.name().to_string(), field)).collect();
+        let reader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()
+            .map_err(|e| format!("cannot create reader: {e}"))?;
+        Ok(Self {
+            index,
+            writer: Mutex::new(None),
+            reader,
+            schema,
+            field_map,
+            config,
+            has_uncommitted: AtomicBool::new(false),
+            next_payload: Mutex::new(None),
+        })
     }
 
     /// Close the index: commit pending writes and release the IndexWriter (flock).

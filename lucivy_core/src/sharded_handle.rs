@@ -57,6 +57,11 @@ pub trait ShardStorage: Send + Sync {
     /// Write a root-level file (e.g. _shard_config.json, _shard_stats.bin).
     fn write_root_file(&self, name: &str, data: &[u8]) -> Result<(), String>;
 
+    /// Delete a root-level file (lucivy 4.4, a released generation's statistics). A missing file is not an error.
+    fn delete_root_file(&self, _name: &str) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Read a root-level file.
     fn read_root_file(&self, name: &str) -> Result<Vec<u8>, String>;
 
@@ -117,6 +122,13 @@ impl ShardStorage for FsShardStorage {
     fn read_root_file(&self, name: &str) -> Result<Vec<u8>, String> {
         std::fs::read(Path::new(&self.base_path).join(name))
             .map_err(|e| format!("cannot read {name}: {e}"))
+    }
+
+    fn delete_root_file(&self, name: &str) -> Result<(), String> {
+        match std::fs::remove_file(Path::new(&self.base_path).join(name)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("cannot delete {name}: {e}")),
+            _ => Ok(()),
+        }
     }
 
     fn root_file_exists(&self, name: &str) -> bool {
@@ -340,10 +352,10 @@ impl<S: crate::blob_store::BlobStore> ShardStorage for BlobShardStorage<S> {
 }
 
 /// File storing shard router state (counters, thresholds).
-const SHARD_STATS_FILE: &str = "_shard_stats.bin";
+pub(crate) const SHARD_STATS_FILE: &str = "_shard_stats.bin";
 
 /// Config file for the sharded index (number of shards + schema).
-const SHARD_CONFIG_FILE: &str = "_shard_config.json";
+pub(crate) const SHARD_CONFIG_FILE: &str = "_shard_config.json";
 
 // ─── Shard Actor Messages ───────────────────────────────────────────────────
 //
@@ -1074,8 +1086,11 @@ impl luciole::Actor for ShardActor {
                         let mut guard = handle.writer.lock()
                             .map_err(|_| "lock poisoned".to_string())?;
                         if let Some(ref mut writer) = *guard {
-                            let prepared = writer.finalize_flush_and_prepare(results)
+                            let mut prepared = writer.finalize_flush_and_prepare(results)
                                 .map_err(|e| format!("finalize shard_{shard_id}: {e}"))?;
+                            if let Some(payload) = handle.next_payload.lock().map_err(|_| "payload lock poisoned")?.take() {
+                                prepared.set_payload(&payload);
+                            }
                             if fast {
                                 prepared.commit_fast()
                                     .map_err(|e| format!("commit_fast shard_{shard_id}: {e}"))?;
@@ -1614,12 +1629,12 @@ impl Ord for ScoredEntry {
 /// global scheduler. In multi-threaded mode, all shards are searched in parallel.
 /// In WASM single-threaded mode, the scheduler processes them cooperatively.
 pub struct ShardedHandle {
-    shards: Vec<Arc<LucivyHandle>>,
+    pub(crate) shards: Vec<Arc<LucivyHandle>>,
     /// Pool of typed shard actors (key-routed by shard_id).
     shard_pool: luciole::Pool<ShardMsg>,
-    router: Arc<Mutex<ShardRouter>>,
+    pub(crate) router: Arc<Mutex<ShardRouter>>,
     /// Storage backend for root files and shard directories.
-    storage: Box<dyn ShardStorage>,
+    pub(crate) storage: Box<dyn ShardStorage>,
     /// Schema (same across all shards).
     pub schema: Schema,
     /// Field map (same across all shards).
@@ -1637,7 +1652,7 @@ pub struct ShardedHandle {
     shard_bytes_cache: Mutex<std::collections::HashMap<usize, (Vec<(String, u32)>, u64, usize, usize)>>,
     /// A served snapshot (`open_snapshot`): nothing may be written, and
     /// `close()` has nothing to commit or persist — it only stops the actors.
-    read_only: bool,
+    pub(crate) read_only: bool,
     /// Whether the last search hit the per-segment match cap on any segment
     /// (`LUCIVY_MAX_MATCHES_PER_SEGMENT`): its answer was incomplete there.
     /// One flag per handle: a concurrent search on the same handle can
@@ -3003,6 +3018,15 @@ impl ShardedHandle {
     }
 
     pub fn commit(&self) -> Result<(), String> {
+        // A tagged index (lucivy 4.4) commits by generation only: an untagged commit would leave its shards
+        // without a generation the caller's database names.
+        if self.is_tagged() && self.shards.iter().any(|s| s.next_payload.lock().map(|p| p.is_none()).unwrap_or(true)) {
+            return Err("this index is tagged (lucivy 4.4): commit with commit_tagged(<generation>)".into());
+        }
+        self.commit_inner()
+    }
+
+    pub(crate) fn commit_inner(&self) -> Result<(), String> {
         self.ensure_open()?;
         self.ensure_writable()?;
         self.drain_pipeline();

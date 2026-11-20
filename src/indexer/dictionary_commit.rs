@@ -442,10 +442,18 @@ pub(crate) fn delete_consumed_pairs(shared: &Arc<SegmentUpdaterShared>) -> crate
     }
     let written = shared.load_meta();
     let Some(dict) = written.sfx_dictionary.as_ref() else { return Ok(()) };
-    let named: HashSet<&str> = dict.pending_segments.iter().map(|s| s.as_str()).collect();
+    let mut named: HashSet<String> = dict.pending_segments.iter().cloned().collect();
+    // A kept tagged generation (lucivy 4.4) may still name pairs as pending: they stay with it.
+    for g in crate::index::kept_tagged_generations(index.directory()) {
+        let kept = index.directory().atomic_read(&crate::index::tagged_meta_path(g)).ok()
+            .and_then(|b| String::from_utf8(b).ok()).and_then(|s| index.parse_metas(&s).ok());
+        if let Some(d) = kept.and_then(|m| m.sfx_dictionary) {
+            named.extend(d.pending_segments);
+        }
+    }
     for meta in shared.segment_manager.committed_segment_metas() {
         let uuid = meta.id().uuid_string();
-        if named.contains(uuid.as_str()) {
+        if named.contains(&uuid) {
             continue;
         }
         for &field_id in meta.sfx_field_ids() {
