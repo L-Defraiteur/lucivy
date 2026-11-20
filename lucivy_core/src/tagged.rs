@@ -20,7 +20,7 @@ use ld_lucivy::Directory;
 
 use crate::handle::LucivyHandle;
 use crate::shard_router::ShardRouter;
-use crate::sharded_handle::{ShardStorage, ShardedHandle, SHARD_CONFIG_FILE, SHARD_STATS_FILE};
+use crate::sharded_handle::{ShardStorage, ShardedHandle, SHARD_STATS_FILE};
 
 const ROOT_GENERATIONS: &str = "_generations.json";
 const PAYLOAD_PREFIX: &str = "lucivy-generation:";
