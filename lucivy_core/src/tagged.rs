@@ -87,6 +87,12 @@ impl ShardedHandle {
         kept.push(g);
         self.write_shard_state(&kept, g)?;
         for (i, shard) in self.shards.iter().enumerate() {
+            // The dictionary fold rewrites meta.json in the background after a commit: the copy waits for it, and
+            // takes a meta.json that says generation g, never an earlier one.
+            shard.index.dictionary_fold().wait_settled();
+            if shard_generation(shard)? != Some(g) {
+                return Err(format!("commit_tagged({g}): shard_{i}'s meta.json does not say generation {g} after its commit"));
+            }
             let dir = shard.index.directory();
             let meta = dir.atomic_read(Path::new("meta.json")).map_err(|e| format!("shard_{i}: meta.json: {e}"))?;
             dir.atomic_write(&ld_lucivy::index::tagged_meta_path(g), &meta).map_err(|e| format!("shard_{i}: meta.{g}.json: {e}"))?;
