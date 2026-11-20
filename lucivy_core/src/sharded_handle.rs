@@ -355,7 +355,7 @@ impl<S: crate::blob_store::BlobStore> ShardStorage for BlobShardStorage<S> {
 pub(crate) const SHARD_STATS_FILE: &str = "_shard_stats.bin";
 
 /// Config file for the sharded index (number of shards + schema).
-pub(crate) const SHARD_CONFIG_FILE: &str = "_shard_config.json";
+const SHARD_CONFIG_FILE: &str = "_shard_config.json";
 
 // ─── Shard Actor Messages ───────────────────────────────────────────────────
 //
