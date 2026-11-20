@@ -171,3 +171,23 @@ fn an_untagged_index_opens_and_its_first_commit_tagged_tags_it() {
     }
     assert!(index.commit().is_err(), "an untagged commit on a tagged index is refused");
 }
+
+/// A rag3weaver rebuild, or the gesture that sets documents aside by rule, changes the index without a new version
+/// of its caller's database: it commits under the current generation. `commit()` is refused on a tagged index;
+/// `commit_keeping_generation()` is the way, and the generation it leaves is the one it found.
+#[test]
+fn a_commit_keeping_the_generation_changes_the_documents_not_the_generation() {
+    let dir = common::scratch("tagged-keep");
+    let index = ShardedHandle::create(dir.path().to_str().unwrap(), &config()).unwrap();
+    for i in 0..30 {
+        index.add_document_json(i, &serde_json::json!({ "content": text(i, 1) })).unwrap();
+    }
+    index.commit_tagged(1).unwrap();
+    for i in 0..10 {
+        index.delete_by_node_id(i).unwrap();
+    }
+    assert!(index.commit().is_err(), "commit() on a tagged index must be refused");
+    index.commit_keeping_generation().expect("a commit under the current generation");
+    assert_eq!(index.num_docs(), 20);
+    assert_eq!(index.tagged_generations().unwrap(), (vec![1], 1), "the generation is the one the commit found");
+}
