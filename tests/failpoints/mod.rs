@@ -88,29 +88,11 @@ fn test_fail_on_flush_segment() -> ld_lucivy::Result<()> {
     panic!("add_document should have returned an error");
 }
 
-/// A worker's flush fails: the error reaches the caller, by a later `add_document` once the indexing threads see
-/// it. With two workers and 30 MB, the first flush comes around the 90 000th document (93 149 on luciepc, 20 November
-/// 2026), so a bound of 100 000 made the test depend on timing: it went red on main, without any loss (the
-/// commit fails and says so, `test_failpoints_documents_accepted_after_a_failed_flush_are_indexed_or_the_commit_fails`).
-/// The bound is now ten times the flush point.
-#[test]
-fn test_fail_on_flush_segment_but_one_worker_remains() -> ld_lucivy::Result<()> {
-    let _fail_scenario_guard = fail::FailScenario::setup();
-    let mut schema_builder = Schema::builder();
-    let text_field = schema_builder.add_text_field("text", TEXT);
-    let index = Index::create_in_ram(schema_builder.build());
-    let index_writer: IndexWriter = index.writer_with_num_threads(2, 30_000_000)?;
-    fail::cfg("FieldSerializer::close_term", "1*return(simulatederror)").unwrap();
-    for i in 0..1_000_000 {
-        if index_writer
-            .add_document(doc!(text_field => format!("hellohappytaxpayerlongtokenblabla{}", i)))
-            .is_err()
-        {
-            return Ok(());
-        }
-    }
-    panic!("add_document should have returned an error");
-}
+// `test_fail_on_flush_segment_but_one_worker_remains` is gone (20 November 2026): it required a later `add_document`
+// to fail after a worker's flush failed, which lucivy never promised: on luciepc the error reached `add_document` at
+// the 93 149th document in one run and never within a million in another. What lucivy does promise, and what
+// `test_failpoints_documents_accepted_after_a_failed_flush_are_indexed_or_the_commit_fails` checks, is that no accepted
+// document is lost without the commit saying so.
 
 #[test]
 fn test_fail_on_commit_segment() -> ld_lucivy::Result<()> {
