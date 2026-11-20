@@ -1,3 +1,19 @@
+Lucivy 4.3.13 — 20 November 2026
+================================
+
+One safeguard, ahead of 4.4; the index format is unchanged.
+
+- **An index that a newer lucivy marked is refused, by name.** The index
+  settings gain `min_lucivy`, the oldest lucivy that may open the index.
+  An older version refuses to open it while reading `meta.json`, before any
+  writer or garbage collection, and the error names both versions. lucivy 4.4
+  will write it on the indexes whose tagged generations an older garbage
+  collector would take for garbage. Absent on every index written so far:
+  nothing changes for them. Witness `tests/min_lucivy.rs`.
+- Tests: after a failed flush, no accepted document is lost without the commit
+  saying so (`test_failpoints_documents_accepted_after_a_failed_flush_are_indexed_or_the_commit_fails`);
+  the old witness, which required a later `add_document` to fail, is gone.
+
 Lucivy 4.3.12 — 19 November 2026
 ================================
 
