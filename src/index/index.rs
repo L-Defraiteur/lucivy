@@ -52,7 +52,25 @@ fn load_metas(
     inventory: &SegmentMetaInventory,
 ) -> crate::Result<IndexMeta> {
     let meta_data = directory.atomic_read(&META_FILEPATH)?;
-    parse_metas(meta_data, inventory)
+    let metas = parse_metas(meta_data, inventory)?;
+    refuse_a_newer_index(&metas)?;
+    Ok(metas)
+}
+
+/// **An index a newer lucivy marked is refused, by name** (20 November 2026, 4.3.13): its `min_lucivy` names the
+/// oldest version that may open it. Before any writer or garbage collection: a newer index may keep files an older
+/// collector would delete (the tagged generations of 4.4).
+fn refuse_a_newer_index(metas: &IndexMeta) -> crate::Result<()> {
+    let Some(needed) = metas.index_settings.min_lucivy.as_deref() else { return Ok(()) };
+    let this = env!("CARGO_PKG_VERSION");
+    let parse = |v: &str| -> Vec<u64> { v.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).filter_map(|p| p.parse().ok()).collect() };
+    if parse(needed) > parse(this) {
+        return Err(crate::LucivyError::SystemError(format!(
+            "this index needs lucivy {needed} or newer, and this is lucivy {this}: open it with lucivy {needed} or newer \
+             (it may keep files, such as tagged generations, that this version's garbage collection would delete)"
+        )));
+    }
+    Ok(())
 }
 
 /// Save the index meta file.
