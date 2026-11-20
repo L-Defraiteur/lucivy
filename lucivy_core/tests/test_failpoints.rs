@@ -45,3 +45,25 @@ fn maintain_names_the_segment_of_a_text_back_from_its_reprieve() {
     assert_eq!(check.fields.iter().map(|f| f.unknown).sum::<u64>(), 0, "{check:?}");
     index.close().unwrap();
 }
+
+/// **A revert is all or nothing** (lucivy 4.4.0): a failure injected on the third shard leaves the four at their
+/// former generation.
+#[test]
+fn revert_to_is_all_or_nothing() {
+    let _scenario = fail::FailScenario::setup();
+    let dir = common::scratch("tagged-atomic");
+    let config: SchemaConfig = serde_json::from_value(serde_json::json!({ "fields": [{ "name": "content", "type": "text" }], "shards": 4 })).unwrap();
+    let index = ShardedHandle::create(dir.path().to_str().unwrap(), &config).unwrap();
+    for (g, n) in [(1u64, 40u64), (2, 80)] {
+        for i in 0..n {
+            index.add_document_json(g * 1_000 + i, &serde_json::json!({ "content": format!("doc {g} {i}") })).unwrap();
+        }
+        index.commit_tagged(g).unwrap();
+    }
+    let docs = index.num_docs();
+    fail::cfg("tagged::revert_shard", "2*off->1*return").unwrap();
+    assert!(index.revert_to(1).is_err(), "the third shard fails");
+    fail::remove("tagged::revert_shard");
+    assert_eq!(index.num_docs(), docs, "the four shards stay at generation 2");
+    assert_eq!(index.tagged_generations().unwrap(), (vec![1, 2], 2));
+}
