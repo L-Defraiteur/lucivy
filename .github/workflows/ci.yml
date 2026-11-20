@@ -93,15 +93,26 @@ jobs:
       # test (or the engine) that leaves files behind is a red step, not 1.7 GiB
       # found later in a RAM-backed /tmp (14 November 2026). The sources are also
       # checked for fixed /tmp paths (test_no_residue_under_tmp).
+      # A test that skips for want of its corpus passes, and cargo hides its
+      # stderr: each absence is written to LUCIVY_CORPUS_SKIPPED and printed
+      # here after the run, in the log and in the job summary, as not played.
       - name: lucivy-core
         env:
           LUCIVY_CORPUS_ABSENT_OK: "1"
         run: |
           export TMPDIR="$RUNNER_TEMP/lucivy-core-tmp" && mkdir -p "$TMPDIR"
-          cargo test -p lucivy-core --no-fail-fast
+          export LUCIVY_CORPUS_SKIPPED="$RUNNER_TEMP/corpus-absent.txt" && : > "$LUCIVY_CORPUS_SKIPPED"
+          status=0
+          cargo test -p lucivy-core --no-fail-fast || status=$?
+          if [ -s "$LUCIVY_CORPUS_SKIPPED" ]; then
+            echo "== corpus absent: $(wc -l < "$LUCIVY_CORPUS_SKIPPED") test(s) not played on their corpus =="
+            sort "$LUCIVY_CORPUS_SKIPPED"
+            { echo "### Corpus absent — not played on their corpus"; sed 's/^/- /' "$LUCIVY_CORPUS_SKIPPED" | sort; } >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [ -n "$(ls -A "$TMPDIR")" ]; then
             echo "lucivy-core tests left files in their temp dir:"; ls -la "$TMPDIR"; exit 1
           fi
+          exit $status
       - name: lucivy-cpp
         run: |
           export TMPDIR="$RUNNER_TEMP/lucivy-cpp-tmp" && mkdir -p "$TMPDIR"
