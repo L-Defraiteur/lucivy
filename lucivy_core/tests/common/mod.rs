@@ -15,6 +15,9 @@ pub mod corpus;
 
 pub const ABSENT_OK: &str = "LUCIVY_CORPUS_ABSENT_OK";
 
+/// The file a skip for want of a corpus is written to (the CI prints it).
+pub const SKIPPED_LOG: &str = "LUCIVY_CORPUS_SKIPPED";
+
 pub fn absent_ok() -> bool {
     std::env::var(ABSENT_OK).is_ok_and(|v| v == "1")
 }
