@@ -12,7 +12,7 @@ mod segment_reader;
 
 pub use self::index::{Index, IndexBuilder};
 pub(crate) use self::index_meta::SegmentMetaInventory;
-pub use self::index_meta::{IndexMeta, IndexSettings, Order, SegmentMeta, SfxDictionaryMeta};
+pub use self::index_meta::{IndexMeta, IndexSettings, Order, SegmentMeta, SfxDictionaryMeta, TAGGED_GENERATIONS_FILE, kept_tagged_generations, tagged_meta_path};
 pub use self::inverted_index_reader::InvertedIndexReader;
 pub use self::segment::Segment;
 pub use self::segment_component::SegmentComponent;
