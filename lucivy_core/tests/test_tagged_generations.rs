@@ -191,3 +191,60 @@ fn a_commit_keeping_the_generation_changes_the_documents_not_the_generation() {
     assert_eq!(index.num_docs(), 20);
     assert_eq!(index.tagged_generations().unwrap(), (vec![1], 1), "the generation is the one the commit found");
 }
+
+/// **lucivy 4.4.1** — a background merge started before a tagged commit and finished after it used to rewrite
+/// `meta.json` with the opstamp and payload of the commit that started it: the shard lost its generation (seen by
+/// rag3weaver, `commit_tagged(13): shard_1's meta.json does not say generation 13`). Many small commits keep merges in
+/// flight; each tagged commit, once the merges are quiet, must still be the generation of every shard.
+#[test]
+fn a_merge_finished_after_a_tagged_commit_keeps_its_generation() {
+    let dir = common::scratch("tagged-merge-race");
+    let index = ShardedHandle::create(dir.path().to_str().unwrap(), &config()).unwrap();
+    let mut next = 0u64;
+    for g in 1..=30u64 {
+        for _ in 0..8 {
+            for _ in 0..12 {
+                index.add_document_json(next, &serde_json::json!({ "content": text(next, g) })).unwrap();
+                next += 1;
+            }
+            index.commit_keeping_generation().unwrap();
+        }
+        index.commit_tagged(g).unwrap_or_else(|e| panic!("commit_tagged({g}): {e}"));
+        index.wait_merges_quiet().unwrap();
+        let (_, current) = index.tagged_generations().unwrap_or_else(|e| panic!("after commit_tagged({g}) and the merges: {e}"));
+        assert_eq!(current, g);
+    }
+}
+
+/// **lucivy 4.4.1** — `close` commits every shard: on a tagged index, under its current generation, as
+/// `commit_keeping_generation`. It used to commit with no payload, and the reopened index said a cut revert.
+#[test]
+fn close_keeps_the_generation() {
+    let dir = common::scratch("tagged-close");
+    let path = dir.path().to_str().unwrap().to_string();
+    {
+        let index = ShardedHandle::create(&path, &config()).unwrap();
+        for i in 0..40 {
+            index.add_document_json(i, &serde_json::json!({ "content": text(i, 1) })).unwrap();
+        }
+        index.commit_tagged(1).unwrap();
+        index.close().unwrap();
+    }
+    let index = ShardedHandle::open(&path).unwrap();
+    assert_eq!(index.tagged_generations().expect("the generation after a close"), (vec![1], 1));
+}
+
+/// **lucivy 4.4.1** — the commits that bypass `commit_inner` (`commit_fast`, `commit_direct`) are refused on a tagged
+/// index, like `commit`: they would write a `meta.json` with no generation.
+#[test]
+fn the_bypassing_commits_are_refused_on_a_tagged_index() {
+    let dir = common::scratch("tagged-bypass");
+    let index = ShardedHandle::create(dir.path().to_str().unwrap(), &config()).unwrap();
+    index.add_document_json(1, &serde_json::json!({ "content": text(1, 1) })).unwrap();
+    index.commit_tagged(1).unwrap();
+    index.add_document_json(2, &serde_json::json!({ "content": text(2, 1) })).unwrap();
+    assert!(index.commit_fast().is_err(), "commit_fast on a tagged index");
+    assert!(index.commit_direct().is_err(), "commit_direct on a tagged index");
+    index.commit_keeping_generation().unwrap();
+    assert_eq!(index.tagged_generations().unwrap(), (vec![1], 1));
+}
