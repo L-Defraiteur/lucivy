@@ -1229,8 +1229,8 @@ pub fn filter_by_chain_threshold(
     for chain in chains {
         if chain.trigram_indices.len() >= threshold {
             bitset.insert(chain.doc_id);
-            let miss_count = total_trigrams - chain.trigram_indices.len();
-            coverage.push((chain.doc_id, -(miss_count as f32)));
+            let miss_count = total_trigrams.saturating_sub(chain.trigram_indices.len());
+            coverage.push((chain.doc_id, crate::query::phrase_query::fuzzy_contains::coverage_of(miss_count, total_trigrams)));
         }
     }
 

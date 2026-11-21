@@ -655,7 +655,9 @@ fn fuzzy_contains_inner(
     highlights.dedup();
 
     let doc_coverage: Vec<(DocId, f32)> = best_miss.into_iter()
-        .map(|(doc, miss)| (doc, -(miss as f32)))
+        // Coverage, in ]0, 1] (lucivy 4.4.2): the share of the query's trigrams the best match found. The scorer
+        // multiplies the BM25 by it. It was -(missed trigrams), scored as `-1000 × missed + BM25`.
+        .map(|(doc, miss)| (doc, coverage_of(miss as usize, ngrams.len())))
         .collect();
 
     let _total_ms = _t_total.elapsed().as_millis();
@@ -665,6 +667,14 @@ fn fuzzy_contains_inner(
     //     hits_by_doc.len(), highlights.len());
 
     Ok((doc_bitset, highlights, doc_coverage))
+}
+
+/// The share of `total` trigrams found when `missed` are missing, in ]0, 1]; 1 when there is nothing to miss.
+pub(crate) fn coverage_of(missed: usize, total: usize) -> f32 {
+    if total == 0 {
+        return 1.0;
+    }
+    (total.saturating_sub(missed) as f32 / total as f32).clamp(f32::MIN_POSITIVE, 1.0)
 }
 
 #[cfg(test)]

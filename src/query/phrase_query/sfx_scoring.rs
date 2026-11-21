@@ -210,7 +210,13 @@ impl SfxScorer {
 
     /// Attaches per-document fuzzy penalties, added to the BM25 score as `penalty * 1000`.
     pub fn with_coverage(mut self, coverage: Vec<(DocId, f32)>) -> Self {
-        self.coverage_boost = coverage.into_iter().collect();
+        // The best coverage of a document, when several matches report one.
+        for (doc, c) in coverage {
+            let e = self.coverage_boost.entry(doc).or_insert(c);
+            if c > *e {
+                *e = c;
+            }
+        }
         self
     }
 }
@@ -250,7 +256,8 @@ impl Scorer for SfxScorer {
         let fieldnorm_id = self.fieldnorm_reader.fieldnorm_id(doc);
         let base_score = self.bm25_weight.score(fieldnorm_id, tf);
         if let Some(&miss_penalty) = self.coverage_boost.get(&doc) {
-            miss_penalty * 1000.0 + base_score
+            // lucivy 4.4.2: BM25 × coverage, positive, comparable across clauses.
+            base_score * miss_penalty.clamp(0.0, 1.0)
         } else {
             base_score
         }

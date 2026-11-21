@@ -434,7 +434,7 @@ pub fn fuzzy_v3(
         for m in &matches {
             bitset.insert(m.doc_id);
             highlights.push((m.doc_id, m.byte_from as usize, m.byte_to as usize));
-            coverage.push((m.doc_id, 0.0));
+            coverage.push((m.doc_id, 1.0));
         }
         return (bitset, highlights, coverage);
     }
@@ -636,7 +636,7 @@ mod tests {
         };
         let (bitset, _, coverage) = fuzzy_v3(&ctx, "mutex_lo", 0, true, 1, Default::default());
         assert!(bitset.contains(0));
-        assert!(coverage.iter().any(|&(_, score)| score == 0.0));
+        assert!(coverage.iter().any(|&(_, score)| score == 1.0), "an exact match covers every trigram");
     }
 
     #[test]

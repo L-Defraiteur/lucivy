@@ -691,7 +691,13 @@ impl SuffixContainsScorer {
     }
 
     pub(crate) fn with_coverage(mut self, coverage: Vec<(DocId, f32)>) -> Self {
-        self.coverage_boost = coverage.into_iter().collect();
+        // The best coverage of a document, when several matches report one.
+        for (doc, c) in coverage {
+            let e = self.coverage_boost.entry(doc).or_insert(c);
+            if c > *e {
+                *e = c;
+            }
+        }
         self
     }
 }
@@ -737,7 +743,9 @@ impl Scorer for SuffixContainsScorer {
             //   3 misses → -3000 + bm25 (false positive tier)
             // Exact matches and d=0 rank in the same tier (pure BM25).
             // BM25 breaks ties within the same miss count.
-            miss_penalty * 1000.0 + base_score
+            // lucivy 4.4.2: BM25 × coverage (the share of the query's trigrams found), in place of
+            // `-1000 × missed + BM25`.
+            base_score * miss_penalty.clamp(0.0, 1.0)
         } else {
             base_score
         }
