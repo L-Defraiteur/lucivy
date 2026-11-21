@@ -1,10 +1,10 @@
 //! **lucivy 4.4.2 — a boolean of fuzzy `contains` counts one error budget per document** (Lucie, 22 November 2026:
 //! « partager un compte d'erreur global plutôt que chacun »). A fuzzy `contains` scores `−1000 × errors + BM25`, the
-//! errors being its verified edits (v3) or missed trigrams (v2). Inside a `boolean` — and `contains_split`, which
-//! expands to one — the clauses used to add up their penalties while a word not found cost nothing: a document that
-//! found three words with a typo each ranked below a document that found a single word. Now a boolean with fuzzy
-//! clauses scores `−1000 × (errors of the words found + (distance + 1) per word missing) + the sum of their BM25`; a
-//! single `contains` is unchanged.
+//! errors being its verified edits (v3) or missed trigrams (v2). `contains_split` expanded to a `boolean`, whose
+//! clauses added up their penalties while a word not found cost nothing: a document that found three words with a
+//! typo each ranked below a document that found a single word. Now `contains_split` with a distance scores
+//! `−1000 × (errors of the words found + (distance + 1) per word missing) + the sum of their BM25`; a generic
+//! boolean keeps its sum and warns; a single `contains` is unchanged.
 
 mod common;
 
@@ -36,17 +36,21 @@ fn ranked(index: &ShardedHandle, q: &QueryConfig) -> Vec<(u64, f32)> {
     ids.into_iter().zip(results.iter().map(|r| r.score)).collect()
 }
 
+/// A generic boolean keeps its sum (its clauses may be unrelated: a fuzzy title, an exact body, a filter); with two
+/// fuzzy `contains` or more, it says so and points to `contains_split` (Lucie, 22 November 2026: « on met un warning
+/// plutôt que modifier le boolean »).
 #[test]
-fn three_words_found_with_a_typo_each_rank_above_a_single_exact_word() {
-    // One edit each (a substitution, two deletions): a swap of two letters is two edits, out of distance 1.
-    let (_dir, index) = index_of(&["memary safty borowing checker", "memory and nothing else at all", "unrelated words only here"]);
+fn a_boolean_of_fuzzy_contains_says_to_use_contains_split() {
+    let (_dir, index) = index_of(&["memary safty borowing checker"]);
     let q = QueryConfig {
         query_type: "boolean".into(),
         should: Some(["memory", "safety", "borrowing"].iter().map(|w| contains(w, 1)).collect()),
         ..Default::default()
     };
-    let r = ranked(&index, &q);
-    assert_eq!(r.first().map(|(id, _)| *id), Some(0), "the document with all three words, each with a typo, comes first: {r:?}");
+    let w = index.query_warnings(&q);
+    assert!(w.iter().any(|m| m.contains("contains_split")), "the warning names contains_split: {w:?}");
+    let one = QueryConfig { query_type: "boolean".into(), should: Some(vec![contains("memory", 1), contains("safety", 0)]), ..Default::default() };
+    assert!(!index.query_warnings(&one).iter().any(|m| m.contains("contains_split")), "one fuzzy clause: no warning");
 }
 
 #[test]
@@ -60,11 +64,7 @@ fn contains_split_follows_the_same_budget() {
 #[test]
 fn all_words_exact_rank_above_all_words_with_typos() {
     let (_dir, index) = index_of(&["memary safty borowing", "memory safety borrowing"]);
-    let q = QueryConfig {
-        query_type: "boolean".into(),
-        should: Some(["memory", "safety", "borrowing"].iter().map(|w| contains(w, 1)).collect()),
-        ..Default::default()
-    };
+    let q = QueryConfig { query_type: "contains_split".into(), field: Some("content".into()), value: Some("memory safety borrowing".into()), distance: Some(1), ..Default::default() };
     let r = ranked(&index, &q);
     assert_eq!(r.first().map(|(id, _)| *id), Some(1), "exact words first: {r:?}");
 }
