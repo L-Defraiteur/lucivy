@@ -4,10 +4,14 @@
 
 mod common;
 
+/// The two tests set the same environment variables: one at a time.
+static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn a_skip_for_want_of_a_corpus_is_written_where_the_ci_reads_it() {
     let scratch = common::scratch("corpus_skip_is_said");
     let log = scratch.path().join("skipped.txt");
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
     // This binary holds this test alone: setting the variables touches no other test.
     unsafe {
         std::env::set_var(common::ABSENT_OK, "1");
@@ -27,6 +31,7 @@ fn a_skip_for_want_of_a_corpus_is_written_where_the_ci_reads_it() {
 fn skips_written_at_once_stay_whole_lines() {
     let scratch = common::scratch("corpus_skips_at_once");
     let log = scratch.path().join("skipped.txt");
+    let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
     unsafe {
         std::env::set_var(common::ABSENT_OK, "1");
         std::env::set_var(common::SKIPPED_LOG, &log);
