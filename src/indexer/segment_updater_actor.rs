@@ -457,7 +457,12 @@ impl SegmentUpdaterState {
             return Err(crate::LucivyError::SystemError(format!("merge: {e}")));
         }
 
-        self.shared.save_metas(opstamp, payload)?;
+        // The meta of now, not the one of the commit that started these merges: a commit that came in between
+        // (lucivy 4.4, a tagged commit) wrote its own opstamp and payload, and rewriting the older ones lost its
+        // generation. Like the dictionary fold and compaction, which already read the current meta.
+        let _ = (opstamp, payload);
+        let current = self.shared.load_meta();
+        self.shared.save_metas(current.opstamp, current.payload.clone())?;
         let _ = garbage_collect_files(&self.shared)?;
         Ok(())
     }

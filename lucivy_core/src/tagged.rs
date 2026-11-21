@@ -205,6 +205,23 @@ impl ShardedHandle {
         Ok(())
     }
 
+    /// The payload a commit that makes no new generation writes on a tagged index (`close`); `None` untagged.
+    pub(crate) fn payload_of_current_generation(&self) -> Result<Option<String>, String> {
+        if !self.is_tagged() {
+            return Ok(None);
+        }
+        let (_, current) = self.tagged_state()?;
+        Ok(Some(format!("{PAYLOAD_PREFIX}{current}")))
+    }
+
+    /// The commits that bypass `commit_inner` write a `meta.json` with no generation: refused on a tagged index.
+    pub(crate) fn refuse_untagged_bypass(&self, what: &str) -> Result<(), String> {
+        if self.is_tagged() {
+            return Err(format!("this index is tagged (lucivy 4.4): {what} would commit outside every generation; commit_tagged or commit_keeping_generation"));
+        }
+        Ok(())
+    }
+
     fn ensure_writable_for_tagged(&self) -> Result<(), String> {
         if self.read_only {
             return Err("a read-only handle does not revert".into());
