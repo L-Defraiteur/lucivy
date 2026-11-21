@@ -71,8 +71,10 @@ pub fn usable(root: &str, found: usize, min: usize, substitute: &str) -> bool {
         if let Ok(log) = std::env::var(SKIPPED_LOG) {
             use std::io::Write;
             let test = std::thread::current().name().unwrap_or("?").to_string();
+            // One write per line: with O_APPEND a single write is not split by another thread's.
+            let line = format!("{test}: corpus absent ({found} files under {root}, {min} needed) — {substitute}\n");
             if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
-                let _ = writeln!(f, "{test}: corpus absent ({found} files under {root}, {min} needed) — {substitute}");
+                let _ = f.write_all(line.as_bytes());
             }
         }
         return false;
