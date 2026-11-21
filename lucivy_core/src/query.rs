@@ -417,8 +417,18 @@ pub fn build_query(
         "contains_split" | "sfx_contains_split" => {
             require_sfx(index)?;
             let expanded = expand_split(config, "contains");
-            build_query(&expanded, schema, index, highlight_sink)
-                .map(|q| q as Box<dyn Query>)
+            // lucivy 4.4.2: fuzzy words share one error budget per document (`ErrorBudgetQuery`); exact words keep
+            // the boolean sum of their BM25.
+            let distance = config.distance.unwrap_or(0);
+            match (&expanded.should, distance) {
+                (Some(words), d) if d > 0 && words.len() > 1 => {
+                    let words = words.iter()
+                        .map(|w| build_query(w, schema, index, highlight_sink.clone()))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(Box::new(ld_lucivy::query::ErrorBudgetQuery::new(words, d as u32 + 1)) as Box<dyn Query>)
+                }
+                _ => build_query(&expanded, schema, index, highlight_sink).map(|q| q as Box<dyn Query>),
+            }
         }
         "startsWith_split" => {
             require_sfx(index)?;

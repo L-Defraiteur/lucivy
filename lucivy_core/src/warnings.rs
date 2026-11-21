@@ -54,6 +54,17 @@ fn collect(config: &QueryConfig, out: &mut Vec<String>) {
         out.push("`max_expansions` is not read and was ignored".to_string());
     }
 
+    // lucivy 4.4.2: a boolean sums its clauses' scores; fuzzy clauses each carry `-1000 × errors`, and a clause not
+    // found costs nothing, so finding more words with typos ranks lower. `contains_split` counts one budget.
+    if config.query_type == "boolean" {
+        let fuzzy = config.should.iter().flatten()
+            .filter(|c| matches!(c.query_type.as_str(), "contains" | "fuzzy" | "sfx_contains") && c.distance.unwrap_or(0) > 0)
+            .count();
+        if fuzzy >= 2 {
+            out.push(format!("{fuzzy} fuzzy `contains` in one boolean: their typo penalties add up and a word not found costs nothing, so a document that finds more of them with typos ranks lower — for the words of one query, use `contains_split` with `distance`, which counts one error budget per document"));
+        }
+    }
+
     let value = config.value.as_deref().or(config.pattern.as_deref()).unwrap_or("");
 
     // `fields` (plural) is only read by `parse` and the boolean composites;
