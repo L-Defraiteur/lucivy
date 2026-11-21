@@ -1,4 +1,4 @@
-# lucivy 4.3.13
+# lucivy 4.4.0
 
 [![PyPI](https://img.shields.io/pypi/v/lucivy?label=PyPI&color=blue)](https://pypi.org/project/lucivy/)
 [![npm](https://img.shields.io/npm/v/lucivy?label=npm&color=cb3837)](https://www.npmjs.com/package/lucivy)
@@ -31,6 +31,14 @@ tab. The second half is typed by hand — `index postgres`, then `--strict
 "heap_insert"`, `"CREATE INDEX CONCURRENTLY"` (27 hits, 11 ms), `--fuzzy 1
 "vaccum"` (17 ms) and `--regex "ExecInit[A-Z][a-zA-Z]+\("` (20 ms).*
 
+### What's new in 4.4.0
+
+A minor release: tagged generations, for a caller that keeps several versions of an index. Indexes that are never tagged are unchanged, on disk and in behaviour.
+
+- **Tagged generations** (`lucivy-core`, on `ShardedHandle`), for a caller whose database names a version of the full-text index. `commit_tagged(g)` commits the shards as generation `g`; `release_below(g)` lets the generations below `g` go once the caller validated `g`; `revert_to(g)` brings the four shards back to a kept generation, all or nothing; `tagged_generations()` lists them and names a shard left at another generation; `open_read_only_at(path, g)` reads a kept generation without writing anything. `commit_keeping_generation()` commits a change that is no new version (a rebuild, documents set aside); maintenance and compaction commit that way.
+- **On a tagged index, `commit()` is refused**, and `maintain` / `compact` refuse to start while documents are uncommitted. An index never tagged behaves as before.
+- **Older versions keep out.** A tagged index carries `min_lucivy`: 4.3.13 refuses to open it and names the version it needs, instead of collecting its kept generations. Versions before 4.3.13 do not know the field: do not open a tagged index with them.
+
 ### What's new in 4.3.13
 
 A patch release with one safeguard, ahead of 4.4. The index format is unchanged.
@@ -41,7 +49,7 @@ A patch release with one safeguard, ahead of 4.4. The index format is unchanged.
 
 A patch release with one fix. The index format is unchanged.
 
-- **The dictionary compaction no longer loses words.** A word whose text the compaction had removed could come back in a new document with its old id and no text: that document stopped coming out for the word, exact or fuzzy, silently. The shards' commit now forgets its pending words, and the compaction removes the ids it drops. As a safety net, a dead text is kept one more cycle in a reprieve, still read; `maintain` names any text taken back from it, and `check_dictionary` counts them apart. Words lost before 4.3.13 come back by rebuilding the index.
+- **The dictionary compaction no longer loses words.** A word whose text the compaction had removed could come back in a new document with its old id and no text: that document stopped coming out for the word, exact or fuzzy, silently. The shards' commit now forgets its pending words, and the compaction removes the ids it drops. As a safety net, a dead text is kept one more cycle in a reprieve, still read; `maintain` names any text taken back from it, and `check_dictionary` counts them apart. Words lost before 4.3.12 come back by rebuilding the index.
 
 ### What's new in 4.3.11
 
@@ -233,7 +241,7 @@ A patch release that fixes concurrency between searches and writes. The index fo
   3.0.x does not open a 4.0 index; the first commit in 4.0 converts without
   return.
 - One version number for the whole workspace: `ld-lucivy`, `lucivy-core`,
-  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.3.13.
+  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.4.0.
 
 3.0.x brought SFX v3 (exact byte spans on every query mode), boolean syntax,
 Jaro-Winkler, query warnings, bring-your-own-storage in every binding, snapshots
