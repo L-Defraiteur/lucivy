@@ -36,7 +36,8 @@ fn ranked(index: &ShardedHandle, q: &QueryConfig) -> Vec<(u64, f32)> {
 
 #[test]
 fn three_words_found_with_a_typo_each_rank_above_a_single_exact_word() {
-    let (_dir, index) = index_of(&["memroy saftey borowing checker", "memory and nothing else at all", "unrelated words only here"]);
+    // One edit each (a substitution, two deletions): a swap of two letters is two edits, out of distance 1.
+    let (_dir, index) = index_of(&["memary safty borowing checker", "memory and nothing else at all", "unrelated words only here"]);
     let q = QueryConfig {
         query_type: "boolean".into(),
         should: Some(["memory", "safety", "borrowing"].iter().map(|w| contains(w, 1)).collect()),
@@ -48,7 +49,7 @@ fn three_words_found_with_a_typo_each_rank_above_a_single_exact_word() {
 
 #[test]
 fn a_fuzzy_contains_never_scores_below_zero() {
-    let (_dir, index) = index_of(&["memroy leak", "memory leak", "memoyr leak", "mmeory leak"]);
+    let (_dir, index) = index_of(&["memary leak", "memory leak", "memorry leak", "mmory leak"]);
     for (word, d) in [("memory", 1u8), ("memory", 2), ("leak", 1)] {
         for (id, score) in ranked(&index, &contains(word, d)) {
             assert!(score >= 0.0, "{word} d{d}: document {id} scores {score}");
@@ -58,7 +59,7 @@ fn a_fuzzy_contains_never_scores_below_zero() {
 
 #[test]
 fn an_exact_match_ranks_above_the_same_text_with_a_typo() {
-    let (_dir, index) = index_of(&["the memory model", "the memroy model"]);
+    let (_dir, index) = index_of(&["the memory model", "the memary model"]);
     let r = ranked(&index, &contains("memory", 1));
     assert_eq!(r.iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec![0, 1], "exact first: {r:?}");
     assert!(r[0].1 > r[1].1, "strictly: {r:?}");
