@@ -1478,17 +1478,20 @@ threshold={threshold} spans={}", kept.len(), spans.len());
     let mut out_hl: Vec<(DocId, usize, usize)> = spans.into_iter()
         .map(|(d, f, t)| (d, f as usize, t as usize)).collect();
     out_hl.sort_unstable();
+    // lucivy 4.4.2: a similarity in ]0, 1], 1 for the exact word, that the scorer multiplies the BM25 by. It was a
+    // tier (`-1000 × verified edit distance + BM25`), and the tiers of a boolean's clauses added up.
+    let query_chars = query.chars().count().max(1) as f32;
     let out_cov = match metric {
-        // Tier = the verified edit distance: 0 for the exact word, 1 one edit
-        // away, whatever the number of token boundaries the query crosses.
+        // 1 − verified edit distance / length of the query, whatever the token boundaries it crosses.
         FuzzyMetric::Levenshtein => kept.iter()
-            .map(|&d| (d, -(best_dist.get(&d).copied().unwrap_or(0) as f32)))
+            .map(|&d| {
+                let dist = best_dist.get(&d).copied().unwrap_or(0) as f32;
+                (d, (1.0 - dist / query_chars).clamp(f32::MIN_POSITIVE, 1.0))
+            })
             .collect(),
-        // Same scale as the miss count (`penalty * 1000 + bm25` in the
-        // scorer): similarity 1.0 is tier 0, 0.9 is one tier down, so a
-        // closer match always ranks above a more frequent one.
+        // The Jaro-Winkler similarity itself.
         FuzzyMetric::JaroWinkler { .. } => best_sim.into_iter()
-            .map(|(d, s)| (d, -((1.0 - s) * 10.0)))
+            .map(|(d, s)| (d, (s as f32).clamp(f32::MIN_POSITIVE, 1.0)))
             .collect(),
     };
     (out_bitset, out_hl, out_cov)

@@ -11,7 +11,6 @@ mod common;
 use lucivy_core::query::{QueryConfig, SchemaConfig};
 use lucivy_core::sharded_handle::ShardedHandle;
 
-fn tier(score: f32) -> i32 { (score / 1000.0).round() as i32 }
 
 #[test]
 fn levenshtein_tier_is_the_verified_edit_distance() {
@@ -43,10 +42,9 @@ fn levenshtein_tier_is_the_verified_edit_distance() {
     let of = |id: u64| hits.iter().find(|(i, _)| *i == id).map(|(_, s)| *s)
         .unwrap_or_else(|| panic!("doc {id} missing: {hits:?}"));
     assert!(!hits.iter().any(|(i, _)| *i == 5), "{hits:?}");
-    assert_eq!(tier(of(1)), 0, "exact text is tier 0: {hits:?}");
-    assert_eq!(tier(of(3)), 0, "exact text without boundaries is tier 0: {hits:?}");
-    assert_eq!(tier(of(2)), -1, "one edit is tier -1 whatever the boundaries: {hits:?}");
-    assert_eq!(tier(of(4)), -1, "one edit without boundaries is tier -1: {hits:?}");
+    // lucivy 4.4.2: no more tiers of 1000 (`BM25 × similarity`, the similarity being 1 − verified edit distance /
+    // length of the query): every score is positive, and the exact text ranks above one edit, boundaries or not.
+    assert!(hits.iter().all(|(_, s)| *s > 0.0), "every score is positive: {hits:?}");
     assert!(of(1) > of(2) && of(3) > of(4), "exact ranks above one edit: {hits:?}");
     h.close().unwrap();
 }
