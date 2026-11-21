@@ -3091,6 +3091,7 @@ impl ShardedHandle {
     /// involvement. Safe for environments where cooperative waiting is
     /// unreliable (emscripten/ASYNCIFY).
     pub fn commit_direct(&self) -> Result<(), String> {
+        self.refuse_untagged_bypass("commit_direct")?;
         // Poll-wait until reader and router mailboxes are empty.
 
         // Poll-wait until reader and router mailboxes are empty.
@@ -3139,6 +3140,7 @@ impl ShardedHandle {
     /// Fast commit: persist data but skip suffix FST rebuild.
     /// Use during bulk indexation. Call commit() at the end to rebuild FSTs.
     pub fn commit_fast(&self) -> Result<(), String> {
+        self.refuse_untagged_bypass("commit_fast")?;
         self.ensure_open()?;
         self.drain_pipeline();
         let results: Vec<Result<(), String>> = self.shard_pool.scatter(
@@ -3185,6 +3187,18 @@ impl ShardedHandle {
         // its bytes are immutable. Committing into it wrote `meta.json` into
         // a read-only directory and failed the close of every snapshot.
         if !self.read_only {
+            // A tagged index (lucivy 4.4) closes under its current generation, as `commit_keeping_generation`.
+            match self.payload_of_current_generation() {
+                Ok(Some(payload)) => {
+                    for shard in &self.shards {
+                        if let Ok(mut p) = shard.next_payload.lock() {
+                            *p = Some(payload.clone());
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => keep(format!("close: the current generation: {e}")),
+            }
             // Commit all shards in parallel.
             let results: Vec<Result<(), String>> = self.shard_pool.scatter(
                 |r| ShardMsg::Commit { fast: false, reply: r },
