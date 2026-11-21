@@ -1,6 +1,6 @@
 [package]
 name = "lucivy-core"
-version = "4.3.13"
+version = "4.4.0"
 edition = "2021"
 license = "MIT"
 description = "Core library for Lucivy full-text search: schema, query, handle, tokenizer"
@@ -20,12 +20,12 @@ mmap = ["ld-lucivy/mmap"]
 failpoints = ["ld-lucivy/failpoints", "dep:fail", "fail/failpoints"]
 
 [dependencies]
-ld-lucivy = { version = "4.3.13", path = "..", default-features = false, features = [
+ld-lucivy = { version = "4.4.0", path = "..", default-features = false, features = [
     "stopwords",
     "lz4-compression",
 ] }
-luciole = { version = "4.3.13", path = "../luciole" }
-lucistore = { version = "4.3.13", path = "../lucistore" }
+luciole = { version = "4.4.0", path = "../luciole" }
+lucistore = { version = "4.4.0", path = "../lucistore" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 fail = { version = "0.5.0", optional = true }

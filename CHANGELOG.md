@@ -1,3 +1,24 @@
+Lucivy 4.4.0 — 21 November 2026
+===============================
+
+Tagged generations, for a caller whose database names a version of the
+full-text index (rag3weaver keeps the last version its database validated and
+the one in progress). Indexes that are never tagged are unchanged.
+
+- **Tagged generations** (`lucivy-core`, on `ShardedHandle`), for a caller whose database names a version of the full-text index. `commit_tagged(g)` commits the shards as generation `g`; `release_below(g)` lets the generations below `g` go once the caller validated `g`; `revert_to(g)` brings the four shards back to a kept generation, all or nothing; `tagged_generations()` lists them and names a shard left at another generation; `open_read_only_at(path, g)` reads a kept generation without writing anything. `commit_keeping_generation()` commits a change that is no new version (a rebuild, documents set aside); maintenance and compaction commit that way.
+
+- **On a tagged index, `commit()` is refused**, and `maintain` / `compact` refuse to start while documents are uncommitted. An index never tagged behaves as before.
+
+- **Older versions keep out.** A tagged index carries `min_lucivy`: 4.3.13 refuses to open it and names the version it needs, instead of collecting its kept generations. Versions before 4.3.13 do not know the field: do not open a tagged index with them.
+
+- Inside ld-lucivy: the garbage collection and the deletion of consumed
+  dictionary pairs spare whatever a kept generation's meta names;
+  `Index::reload_sfx_dictionary` reopens the dictionary from the meta on disk.
+- Witnesses: `tests/test_tagged_generations.rs` (seven) and
+  `revert_to_is_all_or_nothing` in `tests/test_failpoints.rs`.
+- Fixed on the way: a tagged commit now waits for the dictionary fold before
+  copying a shard's meta, and checks it names the generation.
+
 Lucivy 4.3.13 — 20 November 2026
 ================================
 

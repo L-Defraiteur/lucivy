@@ -1,8 +1,12 @@
-# lucivy 4.3.13
+# lucivy 4.4.0
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. From Python. Runs in your process, in your transaction (bring your own storage), and the same engine runs in the browser. Powered by Rust, MIT.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
+
+### What's new in 4.4.0
+
+The engine gains tagged generations, in its Rust core only (`lucivy-core`); this binding does not expose them yet and behaves as in 4.3.13. An index tagged by a 4.4 caller is refused by 4.3.13 and needs 4.4.0.
 
 ### What's new in 4.3.13
 
@@ -14,7 +18,7 @@ A patch release with one safeguard, ahead of 4.4. The index format is unchanged.
 
 A patch release with one fix. The index format is unchanged.
 
-- **The dictionary compaction no longer loses words.** A word whose text the compaction had removed could come back in a new document with its old id and no text: that document stopped coming out for the word, exact or fuzzy, silently. The shards' commit now forgets its pending words, and the compaction removes the ids it drops. As a safety net, a dead text is kept one more cycle in a reprieve, still read; `maintain` names any text taken back from it, and `check_dictionary` counts them apart. Words lost before 4.3.13 come back by rebuilding the index.
+- **The dictionary compaction no longer loses words.** A word whose text the compaction had removed could come back in a new document with its old id and no text: that document stopped coming out for the word, exact or fuzzy, silently. The shards' commit now forgets its pending words, and the compaction removes the ids it drops. As a safety net, a dead text is kept one more cycle in a reprieve, still read; `maintain` names any text taken back from it, and `check_dictionary` counts them apart. Words lost before 4.3.12 come back by rebuilding the index.
 
 ### What's new in 4.3.11
 
@@ -182,7 +186,7 @@ Where a cell says "not with this analyzer", a purpose-built analyzer or plugin m
 ## Install
 
 ```bash
-pip install lucivy  # 4.3.13
+pip install lucivy  # 4.4.0
 ```
 
 ## Quick start
