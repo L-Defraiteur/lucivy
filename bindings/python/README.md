@@ -1,8 +1,13 @@
-# lucivy 4.4.0
+# lucivy 4.4.1
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. From Python. Runs in your process, in your transaction (bring your own storage), and the same engine runs in the browser. Powered by Rust, MIT.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
+
+### What's new in 4.4.1
+
+Fixes to the tagged generations of the Rust core (`lucivy-core`), which this binding does not expose yet. Nothing
+changes for it.
 
 ### What's new in 4.4.0
 
@@ -186,7 +191,7 @@ Where a cell says "not with this analyzer", a purpose-built analyzer or plugin m
 ## Install
 
 ```bash
-pip install lucivy  # 4.4.0
+pip install lucivy  # 4.4.1
 ```
 
 ## Quick start

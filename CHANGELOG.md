@@ -1,3 +1,18 @@
+Lucivy 4.4.1 — 21 November 2026
+===============================
+
+Three fixes to the tagged generations of 4.4.0. The index format is unchanged.
+
+- **A background merge no longer erases a tagged generation.** A merge kept the opstamp and payload of the commit
+  that started it, and rewrote `meta.json` with them when it finished: a `commit_tagged(g)` that came in between lost
+  its generation in that shard. The end of a merge now rewrites the current meta, as the dictionary fold and
+  compaction already did.
+- **`close` keeps the generation.** On a tagged index it commits under the current generation, as
+  `commit_keeping_generation`; it used to write a `meta.json` without one.
+- **`commit_fast` and `commit_direct` are refused on a tagged index**: they bypassed the generation.
+- Witnesses in `tests/test_tagged_generations.rs`: `a_merge_finished_after_a_tagged_commit_keeps_its_generation`,
+  `close_keeps_the_generation`, `the_bypassing_commits_are_refused_on_a_tagged_index`.
+
 Lucivy 4.4.0 — 21 November 2026
 ===============================
 
