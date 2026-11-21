@@ -1,4 +1,4 @@
-# lucivy 4.4.0
+# lucivy 4.4.1
 
 [![PyPI](https://img.shields.io/pypi/v/lucivy?label=PyPI&color=blue)](https://pypi.org/project/lucivy/)
 [![npm](https://img.shields.io/npm/v/lucivy?label=npm&color=cb3837)](https://www.npmjs.com/package/lucivy)
@@ -30,6 +30,19 @@ lucivy's own source from GitHub and indexes it in your browser in a few seconds.
 tab. The second half is typed by hand — `index postgres`, then `--strict
 "heap_insert"`, `"CREATE INDEX CONCURRENTLY"` (27 hits, 11 ms), `--fuzzy 1
 "vaccum"` (17 ms) and `--regex "ExecInit[A-Z][a-zA-Z]+\("` (20 ms).*
+
+### What's new in 4.4.1
+
+A patch release for the tagged generations of 4.4.0, found while plugging them into rag3weaver. The index format is
+unchanged.
+
+- **A background merge no longer erases a tagged generation.** A merge kept the opstamp and payload of the commit
+  that started it, and rewrote `meta.json` with them when it finished: a `commit_tagged(g)` that came in between lost
+  its generation in that shard. The end of a merge now rewrites the current meta, as the dictionary fold and
+  compaction already did.
+- **`close` keeps the generation.** On a tagged index it commits under the current generation, as
+  `commit_keeping_generation`; it used to write a `meta.json` without one.
+- **`commit_fast` and `commit_direct` are refused on a tagged index**: they bypassed the generation.
 
 ### What's new in 4.4.0
 
@@ -241,7 +254,7 @@ A patch release that fixes concurrency between searches and writes. The index fo
   3.0.x does not open a 4.0 index; the first commit in 4.0 converts without
   return.
 - One version number for the whole workspace: `ld-lucivy`, `lucivy-core`,
-  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.4.0.
+  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.4.1.
 
 3.0.x brought SFX v3 (exact byte spans on every query mode), boolean syntax,
 Jaro-Winkler, query warnings, bring-your-own-storage in every binding, snapshots
