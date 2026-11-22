@@ -5,8 +5,9 @@
 //! document — which one found it, its errors, its BM25, its spans — and scores by a budget mode:
 //!
 //! - `Flat`: `-1000 × (errors of the words found + miss_cost per word missing) + sum of their BM25`;
-//! - `Idf`: as `Flat`, a missing word costing `miss_cost × min(1, idf(word) / mean idf)`: a stop word costs almost
-//!   nothing (the bench: « rebuild the vector index » lost its definition, which has no « the »);
+//! - `Idf`: as `Flat`, a missing word costing `miss_cost × min(1, idf(word) / mean idf)`, the missing words counted in
+//!   whole tiers (`floor`): a stop word costs nothing (the bench: « rebuild the vector index » lost its definition,
+//!   which has no « the »);
 //! - `Window`: as `Flat`, counted in the best window of the document, `4 ×` the query's length in bytes: a word found
 //!   elsewhere counts as missing, so a long page scattering the words ranks below a line gathering them;
 //! - `Soft`: as `Flat`, with a tier of `SOFT_TIER` (a few BM25 points) instead of 1000: the BM25, normalised by
@@ -145,6 +146,8 @@ impl ErrorBudgetWeight {
                 let in_window = if self.mode == BudgetMode::Window { best_window(&found, window) } else { None };
                 let counts = |i: usize| in_window.as_ref().is_none_or(|w| w.contains(&i));
                 let (mut errors, mut missing, mut bm25) = (0f64, 0f64, 0f64);
+                // `Idf` counts the missing words in whole tiers: a stop word's fraction of a tier vanishes, a rare
+                // word still costs its full `miss_cost`.
                 for (i, f) in found.iter().enumerate() {
                     match f {
                         Some((score, _)) if counts(i) => {
@@ -156,6 +159,9 @@ impl ErrorBudgetWeight {
                             missing += self.miss_cost as f64 * if self.mode == BudgetMode::Idf { missing_weight[i] } else { 1.0 };
                         }
                     }
+                }
+                if self.mode == BudgetMode::Idf {
+                    missing = missing.floor();
                 }
                 let tier = if self.mode == BudgetMode::Soft { SOFT_TIER } else { 1000.0 };
                 (doc, (-tier * (errors + missing) + bm25) as Score)
