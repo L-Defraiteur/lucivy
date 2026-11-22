@@ -111,7 +111,9 @@ fn idf_budget_lets_a_definition_without_the_stop_word_rank_first() {
 #[test]
 fn window_budget_ranks_gathered_words_above_scattered_ones() {
     let page = format!("rebuild {} vector {} index", "lorem ipsum dolor ".repeat(60), "sit amet ".repeat(60));
-    let (_dir, index) = index_of(&[&page, "please rebuild the vector index now"]);
+    // The line gathers the words with one typo; the page scatters them, exact. Without a window the page, at no error,
+    // ranks first; in the window, the page gathers one word and misses two.
+    let (_dir, index) = index_of(&[&page, "please rebuild the vecor index now"]);
     let r = ranked(&index, &split("rebuild vector index", "window"));
     assert_eq!(r.first().map(|(id, _)| *id), Some(1), "window: the gathered words first: {r:?}");
 }
