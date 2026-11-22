@@ -76,8 +76,10 @@ pub(crate) struct SegmentUpdaterShared {
     #[allow(dead_code)]
     pub(crate) stamper: Stamper,
     pub(crate) event_bus: Arc<EventBus<IndexEvent>>,
-    /// Number of background merge tasks currently running.
-    pub(crate) pending_merge_tasks: AtomicBool,
+    /// **Number of background merge batches currently running.** A counter, not a flag (22 November 2026): two batches
+    /// run at once when a later commit starts one before the first finishes, and the first to finish used to clear
+    /// the flag, so `drain_merges` returned while the other still wrote into the directory.
+    pub(crate) pending_merge_tasks: std::sync::atomic::AtomicUsize,
 }
 
 impl SegmentUpdaterShared {
@@ -323,7 +325,7 @@ impl SegmentUpdater {
             killed: AtomicBool::new(false),
             stamper,
             event_bus: Arc::new(EventBus::new()),
-            pending_merge_tasks: AtomicBool::new(false),
+            pending_merge_tasks: std::sync::atomic::AtomicUsize::new(0),
         });
 
         let (mbox, mut aref) = mailbox::<Envelope>(SEGMENT_UPDATER_MAILBOX_CAPACITY);
@@ -531,7 +533,7 @@ impl SegmentUpdater {
     /// Kept for API compatibility with IndexWriter::wait_merging_threads().
     pub fn wait_merging_thread(&self) -> crate::Result<()> {
         // Poll until background merge tasks are done.
-        while self.shared.pending_merge_tasks.load(Ordering::Acquire) {
+        while self.shared.pending_merge_tasks.load(Ordering::Acquire) > 0 {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         // A shard dictionary's background fold, and the meta.json it asks

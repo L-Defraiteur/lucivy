@@ -388,7 +388,8 @@ impl SegmentUpdaterState {
             }));
         }
 
-        self.shared.pending_merge_tasks.store(true, std::sync::atomic::Ordering::Release);
+        // One batch more; `handle_merges_done` counts it down, once, whatever happens.
+        self.shared.pending_merge_tasks.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
 
         let payload = meta.payload.clone();
         crate::actor::reply::collect_replies_to(
@@ -421,20 +422,19 @@ impl SegmentUpdaterState {
         self_ref: Option<crate::actor::mailbox::ActorRef<crate::actor::envelope::Envelope>>,
     ) -> crate::Result<()> {
         for id in &done.segment_ids { self.merging.remove(id); }
-        // `pending_merge_tasks` stays up until the cascade below decides
-        // nothing else starts: drain_merges() polls it, and a reader that
-        // persists or queries between two batches sees half-written files.
-        let mut still_pending = false;
+        // `pending_merge_tasks` counts the batches running: drain_merges() waits
+        // for zero, and a reader that persists or queries between two batches
+        // would see half-written files.
         let r = self.merges_done_inner(done, opstamp, payload.clone());
-        if r.is_ok() {
-            if let Some(self_ref) = self_ref {
-                still_pending = self.policy_merges(opstamp, payload, self_ref)?;
-            }
-        }
-        if !still_pending {
-            self.shared.pending_merge_tasks.store(false, std::sync::atomic::Ordering::Release);
-        }
-        r
+        // A cascade counts its own batch up before this one is counted down: the count never touches zero between
+        // two batches of the same cascade.
+        let cascade = match (&r, self_ref) {
+            (Ok(()), Some(self_ref)) => self.policy_merges(opstamp, payload, self_ref).map(|_| ()),
+            _ => Ok(()),
+        };
+        self.shared.pending_merge_tasks.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        r?;
+        cascade
     }
 
     fn merges_done_inner(
