@@ -1,4 +1,4 @@
-# lucivy 4.4.1
+# lucivy 4.5.0
 
 [![PyPI](https://img.shields.io/pypi/v/lucivy?label=PyPI&color=blue)](https://pypi.org/project/lucivy/)
 [![npm](https://img.shields.io/npm/v/lucivy?label=npm&color=cb3837)](https://www.npmjs.com/package/lucivy)
@@ -30,6 +30,22 @@ lucivy's own source from GitHub and indexes it in your browser in a few seconds.
 tab. The second half is typed by hand — `index postgres`, then `--strict
 "heap_insert"`, `"CREATE INDEX CONCURRENTLY"` (27 hits, 11 ms), `--fuzzy 1
 "vaccum"` (17 ms) and `--regex "ExecInit[A-Z][a-zA-Z]+\("` (20 ms).*
+
+### What's new in 4.5.0
+
+A minor release: fuzzy queries over several words or several fields share one error budget per document. Nothing
+changes by default.
+
+- **One error budget for the words of a fuzzy query.** `contains_split` with a `distance` takes a `budget`: `sum`
+  (the default, unchanged: the boolean sum of 4.4.1), `flat` (`-1000 × (errors of the words found + (distance + 1) per
+  word missing) + sum of their BM25`, so that finding more words with typos ranks higher), `idf` (a missing word costs
+  by its rarity: a stop word costs nothing), `window` (the budget counted in the best window of the document, so that
+  gathered words rank above scattered ones), `soft` (tiers of a few BM25 points).
+- **`contains` over several `fields`, with a distance, counts one typo per document**: the errors of the best field,
+  the BM25 of every field found. A typo present in two fields is no longer paid twice.
+- **A boolean of fuzzy `contains` says so**: with two fuzzy clauses or more, `query_warnings` explains that their
+  penalties add up and points to `contains_split`.
+- A single `contains` scores as before.
 
 ### What's new in 4.4.1
 
@@ -254,7 +270,7 @@ A patch release that fixes concurrency between searches and writes. The index fo
   3.0.x does not open a 4.0 index; the first commit in 4.0 converts without
   return.
 - One version number for the whole workspace: `ld-lucivy`, `lucivy-core`,
-  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.4.1.
+  `luciole`, `lucistore`, `sparse-vector` and the four bindings are all 4.5.0.
 
 3.0.x brought SFX v3 (exact byte spans on every query mode), boolean syntax,
 Jaro-Winkler, query warnings, bring-your-own-storage in every binding, snapshots
