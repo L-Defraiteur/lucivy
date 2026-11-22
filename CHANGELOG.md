@@ -16,8 +16,11 @@ default; the index format is unchanged.
 - A single `contains` scores as before.
 - Witnesses: `tests/test_fuzzy_error_budget.rs` (8), `tests/test_exact_phrase_separators.rs` (an exact `contains`
   relaxes separators, their absence included, case and repeated spaces).
-- Tests: the index under test of `test_fuzzy_monotonicity` closes before its directory goes (a guard); a run of `main`
-  was red on a temp dir left behind.
+- **Fix: `close()` no longer returns while a merge still writes.** `pending_merge_tasks` was a flag: when a commit
+  started a merge batch before the previous one finished, the first to finish cleared it, so `drain_merges` — and
+  `close()` — returned while the other batch still wrote segment files into the directory (and recreated it if it had
+  been deleted). It now counts the batches running. Witness `tests/test_close_is_quiet.rs`; `main` had been red twice
+  on a temp dir left behind by `test_fuzzy_monotonicity`.
 
 Lucivy 4.4.1 — 21 November 2026
 ===============================
