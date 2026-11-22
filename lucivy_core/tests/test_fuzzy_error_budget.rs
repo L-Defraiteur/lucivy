@@ -172,3 +172,27 @@ fn an_exact_contains_over_fields_searches_every_field() {
     ids.sort();
     assert_eq!(ids, vec![0, 2], "a single field given as `fields`");
 }
+
+/// 4.5.0: a fuzzy `contains` over several fields gave back one document of six (rag3weaver's `search_text_constraints`,
+/// 22 November 2026). Every document carrying the word in one of its fields must come back, as the boolean of one
+/// `contains` per field did.
+#[test]
+fn a_fuzzy_contains_over_fields_finds_every_document() {
+    let dir = common::scratch("fuzzy-fields-all");
+    let cfg: SchemaConfig = serde_json::from_value(serde_json::json!({
+        "fields": [{ "name": "content", "type": "text" }, { "name": "name", "type": "text" }], "shards": 1
+    })).unwrap();
+    let index = ShardedHandle::create(dir.path().to_str().unwrap(), &cfg).unwrap();
+    for (i, n) in ["alpha_lower", "alpha_title", "alpha_upper", "alpha_plain", "alpha_frob", "alpha_phrase"].iter().enumerate() {
+        index.add_document_json(i as u64, &serde_json::json!({ "name": n, "content": format!("fn {n}() {{ let alpha = {i}; alpha }}") })).unwrap();
+    }
+    index.add_document_json(6, &serde_json::json!({ "name": "beta", "content": "fn beta() {}" })).unwrap();
+    index.commit().unwrap();
+    for distance in [0, 1, 2] {
+        let q: QueryConfig = serde_json::from_value(serde_json::json!({"type": "contains", "fields": ["content", "name"], "value": "alpha", "distance": distance})).unwrap();
+        let r = ranked(&index, &q);
+        let mut ids: Vec<u64> = r.iter().map(|(id, _)| *id).collect();
+        ids.sort();
+        assert_eq!(ids, vec![0, 1, 2, 3, 4, 5], "distance {distance}: every document with the word: {r:?}");
+    }
+}
