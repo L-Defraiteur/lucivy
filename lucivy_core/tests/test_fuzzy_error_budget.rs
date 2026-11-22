@@ -180,7 +180,7 @@ fn an_exact_contains_over_fields_searches_every_field() {
 fn a_fuzzy_contains_over_fields_finds_every_document() {
     let dir = common::scratch("fuzzy-fields-all");
     let cfg: SchemaConfig = serde_json::from_value(serde_json::json!({
-        "fields": [{ "name": "content", "type": "text" }, { "name": "name", "type": "text" }], "shards": 1
+        "fields": [{ "name": "content", "type": "text" }, { "name": "name", "type": "text" }], "shards": 4
     })).unwrap();
     let index = ShardedHandle::create(dir.path().to_str().unwrap(), &cfg).unwrap();
     for (i, n) in ["alpha_lower", "alpha_title", "alpha_upper", "alpha_plain", "alpha_frob", "alpha_phrase"].iter().enumerate() {
@@ -188,12 +188,21 @@ fn a_fuzzy_contains_over_fields_finds_every_document() {
     }
     index.add_document_json(6, &serde_json::json!({ "name": "beta", "content": "fn beta() {}" })).unwrap();
     index.commit().unwrap();
+    // rag3weaver searches with a highlight sink and, under a filter, with admitted ids: every way must agree.
+    let all_ids: std::collections::HashSet<u64> = (0..7).collect();
     for distance in [0, 1, 2] {
         let q: QueryConfig = serde_json::from_value(serde_json::json!({"type": "contains", "fields": ["content", "name"], "value": "alpha", "distance": distance})).unwrap();
-        let r = ranked(&index, &q);
-        let mut ids: Vec<u64> = r.iter().map(|(id, _)| *id).collect();
-        ids.sort();
-        assert_eq!(ids, vec![0, 1, 2, 3, 4, 5], "distance {distance}: every document with the word: {r:?}");
+        for way in ["plain", "highlights", "filtered", "filtered+highlights"] {
+            let sink = way.contains("highlights").then(|| std::sync::Arc::new(ld_lucivy::query::HighlightSink::new()));
+            let results = if way.starts_with("filtered") {
+                index.search_filtered(&q, 100, sink, all_ids.clone()).unwrap()
+            } else {
+                index.search(&q, 100, sink).unwrap()
+            };
+            let mut ids = index.node_ids_of(&results).unwrap();
+            ids.sort();
+            assert_eq!(ids, vec![0, 1, 2, 3, 4, 5], "distance {distance}, {way}: every document with the word");
+        }
     }
 }
 
