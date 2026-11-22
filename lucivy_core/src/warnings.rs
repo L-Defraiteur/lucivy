@@ -67,10 +67,14 @@ fn collect(config: &QueryConfig, out: &mut Vec<String>) {
 
     let value = config.value.as_deref().or(config.pattern.as_deref()).unwrap_or("");
 
-    // `fields` (plural) is only read by `parse` and the boolean composites;
+    // `fields` (plural) is only read by `parse`, the boolean composites and `contains`;
     // everywhere else it is silently unused and the single `field` decides —
     // an afternoon was lost to exactly that silence (rag3weaver, 24 August).
+    // A `contains` without `field` reads `fields` (4.5.0, one error budget per document).
+    let contains_over_fields = matches!(config.query_type.as_str(), "contains" | "sfx_contains")
+        && config.field.is_none();
     if config.fields.is_some()
+        && !contains_over_fields
         && !matches!(config.query_type.as_str(), "parse" | "boolean" | "disjunction_max")
     {
         out.push(format!(
