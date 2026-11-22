@@ -196,3 +196,17 @@ fn a_fuzzy_contains_over_fields_finds_every_document() {
         assert_eq!(ids, vec![0, 1, 2, 3, 4, 5], "distance {distance}: every document with the word: {r:?}");
     }
 }
+
+/// 4.5.0 read `fields` on a `contains` but still warned "'fields' is not read by query type \"contains\"". The warning
+/// stays where it is true: a `contains` that also names `field` (the singular wins), and the types that ignore `fields`.
+#[test]
+fn a_contains_over_fields_is_not_warned_as_unread() {
+    let (_dir, index) = index_of(&["memory safety"]);
+    let over: QueryConfig = serde_json::from_value(serde_json::json!({"type": "contains", "fields": ["content", "name"], "value": "memory", "distance": 1})).unwrap();
+    let w = index.query_warnings(&over);
+    assert!(!w.iter().any(|m| m.contains("is not read")), "contains reads `fields`: {w:?}");
+    let both: QueryConfig = serde_json::from_value(serde_json::json!({"type": "contains", "field": "content", "fields": ["content", "name"], "value": "memory"})).unwrap();
+    assert!(index.query_warnings(&both).iter().any(|m| m.contains("is not read")), "`field` wins over `fields`: still warned");
+    let regex: QueryConfig = serde_json::from_value(serde_json::json!({"type": "regex", "fields": ["content"], "value": "mem.*"})).unwrap();
+    assert!(index.query_warnings(&regex).iter().any(|m| m.contains("is not read")), "regex ignores `fields`: still warned");
+}
