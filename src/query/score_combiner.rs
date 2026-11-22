@@ -157,3 +157,30 @@ impl ScoreCombiner for ErrorBudgetCombiner {
         (-1000.0 * errors as f64 + self.bm25) as Score
     }
 }
+
+/// **One `contains` over several fields, one error budget** (lucivy 4.4.2): the errors of the best field found (the
+/// fewest), and the BM25 of every field found. A phrase present with a typo in two fields pays one typo, not two.
+#[derive(Clone, Copy, Default)]
+pub struct BestFieldErrorsCombiner {
+    errors: Option<u32>,
+    bm25: f64,
+}
+
+impl ScoreCombiner for BestFieldErrorsCombiner {
+    fn update<TScorer: Scorer>(&mut self, scorer: &mut TScorer) {
+        let score = scorer.score();
+        let errors = ErrorBudgetCombiner::errors_of(score);
+        self.errors = Some(self.errors.map_or(errors, |e| e.min(errors)));
+        self.bm25 += score as f64 + 1000.0 * errors as f64;
+    }
+
+    fn clear(&mut self) {
+        self.errors = None;
+        self.bm25 = 0.0;
+    }
+
+    #[inline]
+    fn score(&self) -> Score {
+        (-1000.0 * self.errors.unwrap_or(0) as f64 + self.bm25) as Score
+    }
+}
