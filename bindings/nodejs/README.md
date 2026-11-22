@@ -1,8 +1,14 @@
-# lucivy 4.5.0
+# lucivy 4.5.1
 
 **One index answers every question, and every answer is checked.** The default index answers exact substrings, matches across separators, typos across token boundaries, regular expressions and two-character needles — with BM25 and the exact bytes of every match — and nothing to configure per question; the ground-truth harness compares every answer to a scan of the files. From Node.js. Runs in your process, in your transaction (bring your own storage), and the same engine runs in the browser. Powered by Rust via napi-rs, MIT.
 
 [**Try the live playground**](https://l-defraiteur.github.io/lucivy/) — runs entirely in your browser via WASM.
+
+### What's new in 4.5.1
+
+- **The budget and multi-field queries see every shard.** In 4.5.0, `contains` over several `fields` and
+  `contains_split` under a `budget` only searched the first shard of a sharded index. Fixed.
+- **`contains` reads `fields` at any distance**, exact included, and a single field given as `fields`.
 
 ### What's new in 4.5.0
 
@@ -191,7 +197,7 @@ Still there from 2.x: SFX-only engine, distributed search (`exportStats` / `merg
 ## Install
 
 ```bash
-npm install lucivy   # 4.5.0
+npm install lucivy   # 4.5.1
 ```
 
 ## Quick start
