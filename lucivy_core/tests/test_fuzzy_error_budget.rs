@@ -56,7 +56,7 @@ fn a_boolean_of_fuzzy_contains_says_to_use_contains_split() {
 #[test]
 fn contains_split_follows_the_same_budget() {
     let (_dir, index) = index_of(&["memary safty borowing checker", "memory and nothing else at all", "unrelated words only here"]);
-    let q = QueryConfig { query_type: "contains_split".into(), field: Some("content".into()), value: Some("memory safety borrowing".into()), distance: Some(1), ..Default::default() };
+    let q = QueryConfig { query_type: "contains_split".into(), field: Some("content".into()), value: Some("memory safety borrowing".into()), distance: Some(1), budget: Some("flat".into()), ..Default::default() };
     let r = ranked(&index, &q);
     assert_eq!(r.first().map(|(id, _)| *id), Some(0), "contains_split: three words with a typo each come first: {r:?}");
 }
@@ -64,7 +64,7 @@ fn contains_split_follows_the_same_budget() {
 #[test]
 fn all_words_exact_rank_above_all_words_with_typos() {
     let (_dir, index) = index_of(&["memary safty borowing", "memory safety borrowing"]);
-    let q = QueryConfig { query_type: "contains_split".into(), field: Some("content".into()), value: Some("memory safety borrowing".into()), distance: Some(1), ..Default::default() };
+    let q = QueryConfig { query_type: "contains_split".into(), field: Some("content".into()), value: Some("memory safety borrowing".into()), distance: Some(1), budget: Some("flat".into()), ..Default::default() };
     let r = ranked(&index, &q);
     assert_eq!(r.first().map(|(id, _)| *id), Some(1), "exact words first: {r:?}");
 }
@@ -76,4 +76,69 @@ fn a_single_fuzzy_contains_keeps_its_tiers() {
     let r = ranked(&index, &contains("memory", 1));
     assert_eq!(r.iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec![0, 1], "exact first: {r:?}");
     assert!(r[0].1 > 0.0 && r[1].1 < 0.0 && r[1].1 > -1000.0, "exact without error, the typo one tier down: {r:?}");
+}
+
+fn split(value: &str, budget: &str) -> QueryConfig {
+    serde_json::from_value(serde_json::json!({"type": "contains_split", "field": "content", "value": value, "distance": 1, "budget": budget})).unwrap()
+}
+
+/// A long page that holds every word somewhere, and noise documents full of « the ».
+fn long_page_and_a_definition() -> (tempfile::TempDir, ShardedHandle) {
+    let page = format!(
+        "rebuild {} the {} vector {} index",
+        "notes about the plan and the work ".repeat(40),
+        "more of the same and the rest ".repeat(40),
+        "and then the end of the story ".repeat(40)
+    );
+    let mut texts = vec!["fn rebuild_vector_index() -> Result<()>".to_string(), page];
+    for i in 0..20 {
+        texts.push(format!("the note {i} of the day"));
+    }
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    index_of(&refs)
+}
+
+/// (a) `idf`: a missing stop word costs almost nothing. The definition has no « the »: in `flat` the long page, at no
+/// error, ranks first; in `idf` the definition does (the bench: « rebuild the vector index » lost `catalog.rs:2288`).
+#[test]
+fn idf_budget_lets_a_definition_without_the_stop_word_rank_first() {
+    let (_dir, index) = long_page_and_a_definition();
+    let r = ranked(&index, &split("rebuild the vector index", "idf"));
+    assert_eq!(r.first().map(|(id, _)| *id), Some(0), "idf: the definition first: {r:?}");
+}
+
+/// (b) `window`: the words counted in the best window; a line gathering them ranks above a page scattering them.
+#[test]
+fn window_budget_ranks_gathered_words_above_scattered_ones() {
+    let page = format!("rebuild {} vector {} index", "lorem ipsum dolor ".repeat(60), "sit amet ".repeat(60));
+    let (_dir, index) = index_of(&[&page, "please rebuild the vector index now"]);
+    let r = ranked(&index, &split("rebuild vector index", "window"));
+    assert_eq!(r.first().map(|(id, _)| *id), Some(1), "window: the gathered words first: {r:?}");
+}
+
+/// (c) `soft`: smaller tiers, the exact words still before the typos at the same words.
+#[test]
+fn soft_budget_keeps_exact_words_above_typos() {
+    let (_dir, index) = index_of(&["memary safty borowing", "memory safety borrowing"]);
+    let r = ranked(&index, &split("memory safety borrowing", "soft"));
+    assert_eq!(r.first().map(|(id, _)| *id), Some(1), "soft: exact words first: {r:?}");
+    assert!(r.iter().all(|(_, s)| *s > -100.0), "soft tiers stay small: {r:?}");
+}
+
+/// `contains` over several `fields`, one budget: a typo found in two fields is paid once, and the document with the
+/// phrase in both fields ranks above the one with it in one field.
+#[test]
+fn a_fuzzy_contains_over_fields_pays_a_typo_once() {
+    let dir = common::scratch("fuzzy-budget-fields");
+    let cfg: SchemaConfig = serde_json::from_value(serde_json::json!({
+        "fields": [{ "name": "name", "type": "text" }, { "name": "content", "type": "text" }], "shards": 1
+    })).unwrap();
+    let index = ShardedHandle::create(dir.path().to_str().unwrap(), &cfg).unwrap();
+    index.add_document_json(0, &serde_json::json!({ "name": "memary", "content": "the memary model" })).unwrap();
+    index.add_document_json(1, &serde_json::json!({ "name": "other", "content": "the memary model" })).unwrap();
+    index.commit().unwrap();
+    let q: QueryConfig = serde_json::from_value(serde_json::json!({"type": "contains", "fields": ["name", "content"], "value": "memory", "distance": 1})).unwrap();
+    let r = ranked(&index, &q);
+    assert_eq!(r.first().map(|(id, _)| *id), Some(0), "the phrase in two fields first: {r:?}");
+    assert!(r.iter().all(|(_, s)| *s > -1000.0), "one typo, paid once (one tier, not two): {r:?}");
 }
