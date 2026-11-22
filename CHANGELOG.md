@@ -1,3 +1,24 @@
+Lucivy 4.5.0 — 22 November 2026
+===============================
+
+Error budgets for fuzzy queries over several words or fields (Lucie's choice, 22 November 2026). Nothing changes by
+default; the index format is unchanged.
+
+- **One error budget for the words of a fuzzy query.** `contains_split` with a `distance` takes a `budget`: `sum`
+  (the default, unchanged: the boolean sum of 4.4.1), `flat` (`-1000 × (errors of the words found + (distance + 1) per
+  word missing) + sum of their BM25`, so that finding more words with typos ranks higher), `idf` (a missing word costs
+  by its rarity: a stop word costs nothing), `window` (the budget counted in the best window of the document, so that
+  gathered words rank above scattered ones), `soft` (tiers of a few BM25 points).
+- **`contains` over several `fields`, with a distance, counts one typo per document**: the errors of the best field,
+  the BM25 of every field found. A typo present in two fields is no longer paid twice.
+- **A boolean of fuzzy `contains` says so**: with two fuzzy clauses or more, `query_warnings` explains that their
+  penalties add up and points to `contains_split`.
+- A single `contains` scores as before.
+- Witnesses: `tests/test_fuzzy_error_budget.rs` (8), `tests/test_exact_phrase_separators.rs` (an exact `contains`
+  relaxes separators, their absence included, case and repeated spaces).
+- Tests: the index under test of `test_fuzzy_monotonicity` closes before its directory goes (a guard); a run of `main`
+  was red on a temp dir left behind.
+
 Lucivy 4.4.1 — 21 November 2026
 ===============================
 
