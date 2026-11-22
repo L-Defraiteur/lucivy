@@ -144,3 +144,31 @@ fn a_fuzzy_contains_over_fields_pays_a_typo_once() {
     assert_eq!(r.first().map(|(id, _)| *id), Some(0), "the phrase in two fields first: {r:?}");
     assert!(r.iter().all(|(_, s)| *s > -1000.0), "one typo, paid once (one tier, not two): {r:?}");
 }
+
+/// 4.5.0 honoured `fields` only with a distance: an exact `contains` over several fields was refused ("this query type
+/// reads 'field' (singular)"), and so was one over a single field given as `fields`. rag3weaver's exact pass sends
+/// exactly that (22 November 2026, seven reds of its lib).
+#[test]
+fn an_exact_contains_over_fields_searches_every_field() {
+    let dir = common::scratch("exact-fields");
+    let cfg: SchemaConfig = serde_json::from_value(serde_json::json!({
+        "fields": [{ "name": "name", "type": "text" }, { "name": "content", "type": "text" }], "shards": 1
+    })).unwrap();
+    let index = ShardedHandle::create(dir.path().to_str().unwrap(), &cfg).unwrap();
+    index.add_document_json(0, &serde_json::json!({ "name": "memory_store", "content": "the memory model" })).unwrap();
+    index.add_document_json(1, &serde_json::json!({ "name": "other", "content": "the memory model" })).unwrap();
+    index.add_document_json(2, &serde_json::json!({ "name": "memory", "content": "nothing here" })).unwrap();
+    index.add_document_json(3, &serde_json::json!({ "name": "unrelated", "content": "nothing here" })).unwrap();
+    index.commit().unwrap();
+    let q: QueryConfig = serde_json::from_value(serde_json::json!({"type": "contains", "fields": ["name", "content"], "value": "memory"})).unwrap();
+    let r = ranked(&index, &q);
+    let mut ids: Vec<u64> = r.iter().map(|(id, _)| *id).collect();
+    ids.sort();
+    assert_eq!(ids, vec![0, 1, 2], "each document with the word in one of its fields: {r:?}");
+    assert_eq!(r.first().map(|(id, _)| *id), Some(0), "the word in both fields first: {r:?}");
+    assert!(r.iter().all(|(_, s)| *s >= 0.0), "exact: no error tier: {r:?}");
+    let one: QueryConfig = serde_json::from_value(serde_json::json!({"type": "contains", "fields": ["name"], "value": "memory"})).unwrap();
+    let mut ids: Vec<u64> = ranked(&index, &one).iter().map(|(id, _)| *id).collect();
+    ids.sort();
+    assert_eq!(ids, vec![0, 2], "a single field given as `fields`");
+}
