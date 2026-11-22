@@ -56,7 +56,7 @@ fn a_boolean_of_fuzzy_contains_says_to_use_contains_split() {
 #[test]
 fn contains_split_follows_the_same_budget() {
     let (_dir, index) = index_of(&["memary safty borowing checker", "memory and nothing else at all", "unrelated words only here"]);
-    let q = QueryConfig { query_type: "contains_split".into(), field: Some("content".into()), value: Some("memory safety borrowing".into()), distance: Some(1), budget: Some("flat".into()), ..Default::default() };
+    let q = split("memory safety borrowing", "flat");
     let r = ranked(&index, &q);
     assert_eq!(r.first().map(|(id, _)| *id), Some(0), "contains_split: three words with a typo each come first: {r:?}");
 }
@@ -64,7 +64,7 @@ fn contains_split_follows_the_same_budget() {
 #[test]
 fn all_words_exact_rank_above_all_words_with_typos() {
     let (_dir, index) = index_of(&["memary safty borowing", "memory safety borrowing"]);
-    let q = QueryConfig { query_type: "contains_split".into(), field: Some("content".into()), value: Some("memory safety borrowing".into()), distance: Some(1), budget: Some("flat".into()), ..Default::default() };
+    let q = split("memory safety borrowing", "flat");
     let r = ranked(&index, &q);
     assert_eq!(r.first().map(|(id, _)| *id), Some(1), "exact words first: {r:?}");
 }
