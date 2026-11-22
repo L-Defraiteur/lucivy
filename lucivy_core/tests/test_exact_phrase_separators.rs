@@ -1,6 +1,8 @@
-//! **An exact `contains` of several words finds them across any separator** (22 November 2026, for rag3weaver's
-//! whole-query pass at distance 0: « le journal des chantiers » must find `docs/journal-des-chantiers.md`). The default
-//! `contains` relaxes separators; `strict_separators` matches them byte for byte.
+//! **An exact `contains` of several words finds them across any separator, or none** (22 November 2026, for
+//! rag3weaver's whole-query pass at distance 0: « le journal des chantiers » must find `docs/journal-des-chantiers.md`).
+//! The default `contains` relaxes separators — `_`, `-`, `.` and spaces are ignored on both sides, so their absence too:
+//! « journal des chantiers » finds « journaldeschantiers », as « spin lock » finds `spinlock` (the README).
+//! `strict_separators` matches them byte for byte.
 
 mod common;
 
@@ -12,7 +14,7 @@ fn an_exact_contains_of_words_matches_across_separators() {
     let dir = common::scratch("exact-phrase-separators");
     let cfg: SchemaConfig = serde_json::from_value(serde_json::json!({ "fields": [{ "name": "content", "type": "text" }], "shards": 1 })).unwrap();
     let index = ShardedHandle::create(dir.path().to_str().unwrap(), &cfg).unwrap();
-    for (i, t) in ["docs/journal-des-chantiers.md", "le journal des chantiers", "journal_des_chantiers()", "un journal de bord"].iter().enumerate() {
+    for (i, t) in ["docs/journal-des-chantiers.md", "le journal des chantiers", "journal_des_chantiers()", "un journal de bord", "journaldeschantiers"].iter().enumerate() {
         index.add_document_json(i as u64, &serde_json::json!({ "content": t })).unwrap();
     }
     index.commit().unwrap();
@@ -26,7 +28,7 @@ fn an_exact_contains_of_words_matches_across_separators() {
         ids.sort_unstable();
         ids
     };
-    assert_eq!(found(false), vec![0, 1, 2], "relaxed: a space finds a hyphen and an underscore");
+    assert_eq!(found(false), vec![0, 1, 2, 4], "relaxed: a space finds a hyphen, an underscore, and no separator at all");
     assert_eq!(found(true), vec![1], "strict: only the spaces");
 }
 
