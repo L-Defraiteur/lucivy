@@ -219,3 +219,25 @@ fn a_contains_over_fields_is_not_warned_as_unread() {
     let regex: QueryConfig = serde_json::from_value(serde_json::json!({"type": "regex", "fields": ["content"], "value": "mem.*"})).unwrap();
     assert!(index.query_warnings(&regex).iter().any(|m| m.contains("is not read")), "regex ignores `fields`: still warned");
 }
+
+/// 4.5.0: `ErrorBudgetQuery` and `BestFieldQuery` did not hand the prescan to their words, as `BooleanQuery` does —
+/// over several shards, the words only saw shard 0. A `contains_split` under a budget must find every document.
+#[test]
+fn contains_split_under_a_budget_finds_every_document_over_shards() {
+    let dir = common::scratch("budget-shards");
+    let cfg: SchemaConfig = serde_json::from_value(serde_json::json!({
+        "fields": [{ "name": "content", "type": "text" }], "shards": 4
+    })).unwrap();
+    let index = ShardedHandle::create(dir.path().to_str().unwrap(), &cfg).unwrap();
+    for i in 0..8u64 {
+        index.add_document_json(i, &serde_json::json!({ "content": format!("note {i}: memory safety matters") })).unwrap();
+    }
+    index.add_document_json(8, &serde_json::json!({ "content": "nothing related" })).unwrap();
+    index.commit().unwrap();
+    for budget in ["sum", "flat", "idf", "window", "soft"] {
+        let q: QueryConfig = serde_json::from_value(serde_json::json!({"type": "contains_split", "field": "content", "value": "memory safety", "distance": 1, "budget": budget})).unwrap();
+        let mut ids: Vec<u64> = ranked(&index, &q).iter().map(|(id, _)| *id).collect();
+        ids.sort();
+        assert_eq!(ids, (0..8).collect::<Vec<u64>>(), "budget {budget}: every document over four shards");
+    }
+}
