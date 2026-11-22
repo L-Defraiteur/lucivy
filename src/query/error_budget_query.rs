@@ -32,9 +32,13 @@ pub const SOFT_TIER: f64 = 3.0;
 /// How an error budget is counted (see the module).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BudgetMode {
+    /// `-1000 × (errors of the words found + miss_cost per word missing) + sum of their BM25`.
     Flat,
+    /// As `Flat`, a missing word weighted by its idf, the missing words counted in whole tiers.
     Idf,
+    /// As `Flat`, counted in the best window of the document.
     Window,
+    /// As `Flat`, with tiers of `SOFT_TIER` BM25 points.
     Soft,
 }
 
@@ -54,11 +58,15 @@ impl BudgetMode {
 /// One word of the query: its query, the sink its spans go to (for `Window`), and its length in bytes.
 #[derive(Debug)]
 pub struct BudgetWord {
+    /// The query of the word (a `contains`).
     pub query: Box<dyn Query>,
+    /// The sink its spans go to, for `BudgetMode::Window`; `None` otherwise.
     pub sink: Option<Arc<HighlightSink>>,
+    /// The length of the word, in bytes.
     pub len: usize,
 }
 
+/// The words of one query under one error budget per document (see the module).
 #[derive(Debug)]
 pub struct ErrorBudgetQuery {
     words: Vec<BudgetWord>,
@@ -250,6 +258,7 @@ impl Clone for BestFieldQuery {
 }
 
 impl BestFieldQuery {
+    /// One query per field, the same `contains` on each.
     pub fn new(fields: Vec<Box<dyn Query>>) -> BestFieldQuery {
         BestFieldQuery { fields }
     }
