@@ -409,10 +409,15 @@ pub fn build_query(
         }
         "contains" | "sfx_contains" => {
             require_sfx(index)?;
-            // lucivy 4.4.2: a fuzzy `contains` over several `fields`, one error budget per document (the errors of
-            // the best field, the BM25 of all): a typo in two fields is not paid twice.
-            match (&config.fields, config.distance.unwrap_or(0)) {
-                (Some(fields), d) if d > 0 && fields.len() > 1 => {
+            // A `contains` over several `fields`, one error budget per document (the errors of the best field, the
+            // BM25 of all): a typo in two fields is not paid twice. At distance 0 the same query is a plain union with
+            // summed BM25 — 4.5.0 refused it there, and refused a single field given as `fields` (4.5.1).
+            match (&config.fields, config.field.is_none()) {
+                (Some(fields), true) if fields.len() == 1 => {
+                    let one = QueryConfig { field: Some(fields[0].clone()), fields: None, ..config.clone() };
+                    build_contains_query(&one, schema, highlight_sink)
+                }
+                (Some(fields), true) if fields.len() > 1 => {
                     let per_field = fields.iter()
                         .map(|f| {
                             let one = QueryConfig { field: Some(f.clone()), fields: None, ..config.clone() };
