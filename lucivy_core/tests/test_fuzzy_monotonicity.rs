@@ -69,9 +69,24 @@ fn walk(dir: &std::path::Path, exclude: &[&str], files: &mut Vec<(String, String
     }
 }
 
-/// The index, its content field, and the scratch directory it lives in
-/// (keep the guard alive as long as the handle).
-fn build_index(files: &[(String, String)], drain: bool) -> (tempfile::TempDir, LucivyHandle, ld_lucivy::schema::Field) {
+/// **An index under test and its directory, released in order** (22 November 2026: `main` was red, a run left
+/// `lucivy-test-test_monotonicity_segments-*` in its temp dir). An undrained index keeps policy merges running after
+/// the test; the handle was dropped without waiting for them, then the `TempDir` removed its directory while a merge
+/// still wrote into it, and the removal failed silently. Dropping this guard closes the handle first (`close` drains
+/// the merges), then removes the directory.
+struct IndexUnderTest {
+    handle: LucivyHandle,
+    _scratch: tempfile::TempDir,
+}
+
+impl Drop for IndexUnderTest {
+    fn drop(&mut self) {
+        let _ = self.handle.close();
+    }
+}
+
+/// The index (in its guard) and its content field.
+fn build_index(files: &[(String, String)], drain: bool) -> (IndexUnderTest, ld_lucivy::schema::Field) {
     let scratch = if drain {
         common::scratch("test_monotonicity_drained")
     } else {
@@ -113,7 +128,7 @@ fn build_index(files: &[(String, String)], drain: bool) -> (tempfile::TempDir, L
     eprintln!("Index: {} docs, {} segments (drain={})",
         searcher.num_docs(), searcher.segment_readers().len(), drain);
 
-    (scratch, handle, content_field)
+    (IndexUnderTest { handle, _scratch: scratch }, content_field)
 }
 
 fn make_contains_config(query_text: &str, distance: u8) -> QueryConfig {
@@ -178,7 +193,8 @@ fn test_monotonicity_real_repo() {
     eprintln!("Collected {} files", files.len());
 
     // Build with multiple segments (like WASM playground — no drain)
-    let (_scratch, handle, _) = build_index(&files, false);
+    let (index, _) = build_index(&files, false);
+    let handle = &index.handle;
 
     // Edge-case queries: cross-token substrings, mid-token starts/ends
     let queries = vec![
@@ -758,4 +774,19 @@ fn test_camelcase_matched_by_underscore_query() {
     eprintln!("d=0 'query_result_is_success': {} docs (does it find CamelCase?)", d0);
 
     assert!(d1 >= d0, "d=1 must be superset of d=0");
+}
+
+/// The guard of `build_index` leaves nothing behind: an undrained index, many commits and merges in flight, released at
+/// once — its directory is gone.
+#[test]
+fn an_undrained_index_under_test_leaves_no_directory() {
+    let files: Vec<(String, String)> = (0..1200)
+        .map(|i| (format!("f{i}.rs"), format!("pub fn function_{i}() -> u32 {{ {i} }} // rag3db_value_{i}")))
+        .collect();
+    for _ in 0..3 {
+        let (index, _) = build_index(&files, false);
+        let dir = index._scratch.path().to_path_buf();
+        drop(index);
+        assert!(!dir.exists(), "the directory of an undrained index is removed: {}", dir.display());
+    }
 }
