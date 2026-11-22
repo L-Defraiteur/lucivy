@@ -274,6 +274,9 @@ pub struct QueryConfig {
     /// `offset`, `slop`, a typo…). They have no effect on the search; they are
     /// kept so that `query_warnings` can name them instead of letting the
     /// caller believe they were applied (ticket of 7 November 2026).
+    /// lucivy 4.4.2, `contains_split` with a distance: how its words share one error budget per document —
+    /// `sum` (the boolean sum of 4.4.1, the default), `flat`, `idf`, `window`, `soft` (`ld_lucivy::query::BudgetMode`).
+    pub budget: Option<String>,
     #[serde(flatten)]
     pub unknown_keys: std::collections::BTreeMap<String, serde_json::Value>,
     /// Internal: this leaf is already one of the two apostrophe forms of its
@@ -406,7 +409,20 @@ pub fn build_query(
         }
         "contains" | "sfx_contains" => {
             require_sfx(index)?;
-            build_contains_query(config, schema, highlight_sink)
+            // lucivy 4.4.2: a fuzzy `contains` over several `fields`, one error budget per document (the errors of
+            // the best field, the BM25 of all): a typo in two fields is not paid twice.
+            match (&config.fields, config.distance.unwrap_or(0)) {
+                (Some(fields), d) if d > 0 && fields.len() > 1 => {
+                    let per_field = fields.iter()
+                        .map(|f| {
+                            let one = QueryConfig { field: Some(f.clone()), fields: None, ..config.clone() };
+                            build_contains_query(&one, schema, highlight_sink.clone())
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(Box::new(ld_lucivy::query::BestFieldQuery::new(per_field)) as Box<dyn Query>)
+                }
+                _ => build_contains_query(config, schema, highlight_sink),
+            }
         }
         "startsWith" => {
             require_sfx(index)?;
@@ -417,15 +433,32 @@ pub fn build_query(
         "contains_split" | "sfx_contains_split" => {
             require_sfx(index)?;
             let expanded = expand_split(config, "contains");
-            // lucivy 4.4.2: fuzzy words share one error budget per document (`ErrorBudgetQuery`); exact words keep
-            // the boolean sum of their BM25.
+            // lucivy 4.4.2: with a distance and a `budget` other than `sum` (the default, the boolean sum of 4.4.1),
+            // the words share one error budget per document (`ErrorBudgetQuery`). `window` gives each word a sink of
+            // its own, to know where it was found.
             let distance = config.distance.unwrap_or(0);
-            match (&expanded.should, distance) {
-                (Some(words), d) if d > 0 && words.len() > 1 => {
+            let mode = match config.budget.as_deref() {
+                None | Some("sum") => None,
+                Some(name) => Some(ld_lucivy::query::BudgetMode::parse(name)
+                    .ok_or_else(|| format!("unknown budget '{name}' (sum | flat | idf | window | soft)"))?),
+            };
+            match (&expanded.should, distance, mode) {
+                (Some(words), d, Some(mode)) if d > 0 && words.len() > 1 => {
                     let words = words.iter()
-                        .map(|w| build_query(w, schema, index, highlight_sink.clone()))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    Ok(Box::new(ld_lucivy::query::ErrorBudgetQuery::new(words, d as u32 + 1)) as Box<dyn Query>)
+                        .map(|w| {
+                            let sink = if mode == ld_lucivy::query::BudgetMode::Window {
+                                Some(Arc::new(HighlightSink::new()))
+                            } else {
+                                highlight_sink.clone()
+                            };
+                            Ok(ld_lucivy::query::BudgetWord {
+                                query: build_query(w, schema, index, sink.clone())?,
+                                sink: if mode == ld_lucivy::query::BudgetMode::Window { sink } else { None },
+                                len: w.value.as_deref().map(str::len).unwrap_or(0),
+                            })
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
+                    Ok(Box::new(ld_lucivy::query::ErrorBudgetQuery::new(words, d as u32 + 1, mode)) as Box<dyn Query>)
                 }
                 _ => build_query(&expanded, schema, index, highlight_sink).map(|q| q as Box<dyn Query>),
             }
