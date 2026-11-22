@@ -66,6 +66,62 @@ pub struct BudgetWord {
     pub len: usize,
 }
 
+/// **The prescan, handed to every sub-query** (as `BooleanQuery` does). Over several shards the search DAG prescans the
+/// segments of every shard through the top query: a composite that kept these defaults left its words to prescan
+/// themselves in `weight()`, on shard 0 alone, and lost the documents of the other shards (lucivy 4.5.0, 22 November
+/// 2026). `$subs` / `$subs_mut` iterate the sub-queries.
+macro_rules! forward_prescan_to_subqueries {
+    ($subs:ident, $subs_mut:ident) => {
+        fn prescan_segments(&mut self, segments: &[&crate::SegmentReader]) -> crate::Result<()> {
+            for q in self.$subs_mut() { q.prescan_segments(segments)?; }
+            Ok(())
+        }
+        fn prescan_truncated(&self) -> bool {
+            self.$subs().any(|q| q.prescan_truncated())
+        }
+        fn prescan_segments_more(&mut self, segments: &[&crate::SegmentReader]) -> crate::Result<()> {
+            for q in self.$subs_mut() { q.prescan_segments_more(segments)?; }
+            Ok(())
+        }
+        fn collect_prescan_doc_freqs(&self, out: &mut std::collections::HashMap<String, u64>) {
+            for q in self.$subs() { q.collect_prescan_doc_freqs(out); }
+        }
+        fn set_global_contains_doc_freqs(&mut self, freqs: &std::collections::HashMap<String, u64>) {
+            for q in self.$subs_mut() { q.set_global_contains_doc_freqs(freqs); }
+        }
+        fn take_prescan_cache(
+            &mut self,
+            out: &mut std::collections::HashMap<(String, crate::index::SegmentId), crate::query::phrase_query::suffix_contains_query::CachedSfxResult>,
+        ) {
+            for q in self.$subs_mut() { q.take_prescan_cache(out); }
+        }
+        fn inject_prescan_cache(
+            &mut self,
+            cache: std::collections::HashMap<(String, crate::index::SegmentId), crate::query::phrase_query::suffix_contains_query::CachedSfxResult>,
+        ) {
+            for q in self.$subs_mut() { q.inject_prescan_cache(cache.clone()); }
+        }
+        fn sfx_prescan_params(&self) -> Vec<crate::query::SfxPrescanParam> {
+            self.$subs().flat_map(|q| q.sfx_prescan_params()).collect()
+        }
+        fn regex_prescan_params(&self) -> Vec<crate::query::RegexPrescanParam> {
+            self.$subs().flat_map(|q| q.regex_prescan_params()).collect()
+        }
+        fn inject_regex_prescan_cache(
+            &mut self,
+            cache: std::collections::HashMap<crate::index::SegmentId, crate::query::phrase_query::regex_continuation_query::CachedRegexResult>,
+        ) {
+            for q in self.$subs_mut() { q.inject_regex_prescan_cache(cache.clone()); }
+        }
+        fn set_global_regex_doc_freqs(&mut self, freqs: &std::collections::HashMap<String, u64>) {
+            for q in self.$subs_mut() { q.set_global_regex_doc_freqs(freqs); }
+        }
+        fn collect_regex_prescan_doc_freqs(&self, out: &mut std::collections::HashMap<String, u64>) {
+            for q in self.$subs() { q.collect_regex_prescan_doc_freqs(out); }
+        }
+    };
+}
+
 /// The words of one query under one error budget per document (see the module).
 #[derive(Debug)]
 pub struct ErrorBudgetQuery {
@@ -89,6 +145,14 @@ impl ErrorBudgetQuery {
     pub fn new(words: Vec<BudgetWord>, miss_cost: u32, mode: BudgetMode) -> ErrorBudgetQuery {
         ErrorBudgetQuery { words, miss_cost, mode }
     }
+
+    fn subqueries(&self) -> impl Iterator<Item = &Box<dyn Query>> {
+        self.words.iter().map(|w| &w.query)
+    }
+
+    fn subqueries_mut(&mut self) -> impl Iterator<Item = &mut Box<dyn Query>> {
+        self.words.iter_mut().map(|w| &mut w.query)
+    }
 }
 
 impl Query for ErrorBudgetQuery {
@@ -108,6 +172,8 @@ impl Query for ErrorBudgetQuery {
             w.query.query_terms(visitor);
         }
     }
+
+    forward_prescan_to_subqueries!(subqueries, subqueries_mut);
 }
 
 struct ErrorBudgetWeight {
@@ -262,6 +328,14 @@ impl BestFieldQuery {
     pub fn new(fields: Vec<Box<dyn Query>>) -> BestFieldQuery {
         BestFieldQuery { fields }
     }
+
+    fn subqueries(&self) -> impl Iterator<Item = &Box<dyn Query>> {
+        self.fields.iter()
+    }
+
+    fn subqueries_mut(&mut self) -> impl Iterator<Item = &mut Box<dyn Query>> {
+        self.fields.iter_mut()
+    }
 }
 
 impl Query for BestFieldQuery {
@@ -283,4 +357,6 @@ impl Query for BestFieldQuery {
             q.query_terms(visitor);
         }
     }
+
+    forward_prescan_to_subqueries!(subqueries, subqueries_mut);
 }
