@@ -1837,9 +1837,15 @@ fn v3_parse_is_alive_and_honest() {
         value: Some("Rust AND safety".into()), ..Default::default()
     });
     assert!(w.iter().any(|m| m.contains("boolean syntax")), "{w:?}");
+    // Since 4.5.0 a `contains` without `field` reads `fields`; a type that ignores it is still warned.
     let w = handle.query_warnings(&QueryConfig {
         query_type: "contains".into(), fields: Some(vec!["content".into()]),
         value: Some("rust".into()), ..Default::default()
+    });
+    assert!(!w.iter().any(|m| m.contains("'fields' is not read")), "{w:?}");
+    let w = handle.query_warnings(&QueryConfig {
+        query_type: "regex".into(), fields: Some(vec!["content".into()]),
+        value: Some("rus.".into()), ..Default::default()
     });
     assert!(w.iter().any(|m| m.contains("'fields' is not read")), "{w:?}");
 }
