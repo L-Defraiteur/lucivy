@@ -1,3 +1,17 @@
+Lucivy 4.5.1 — 22 November 2026
+===============================
+
+Two fixes to the queries of 4.5.0, found by rag3weaver (one document of six came back). The index format is unchanged.
+
+- **`ErrorBudgetQuery` and `BestFieldQuery` hand the prescan to their sub-queries**, as `BooleanQuery` does. Over
+  several shards the search DAG prescans the segments of every shard through the top query; the two composites kept
+  the defaults, so their `contains` prescanned themselves on shard 0 alone. `contains` over several `fields` and
+  `contains_split` under a `budget` other than `sum` lost the documents of the other shards.
+- **`contains` reads `fields` at any distance**: at distance 0, or with a single field given as `fields`, 4.5.0 refused
+  the query. The warning "'fields' is not read" no longer targets a `contains` without `field`.
+- Witnesses in `tests/test_fuzzy_error_budget.rs`: six documents over four shards (distances 0/1/2, plain, highlights,
+  admitted ids), every budget over four shards, the exact multi-field `contains`, the warning.
+
 Lucivy 4.5.0 — 22 November 2026
 ===============================
 
